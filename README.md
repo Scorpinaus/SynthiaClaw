@@ -2,27 +2,62 @@
 
 SynthiaClaw is a local-first chat workspace with a Fastify backend, React/Vite
 frontend, shared Zod contracts, SQLite conversation persistence, and an
-OpenAI-compatible model provider.
+OpenAI-compatible model provider. Agent conversations can use either an API
+key or a ChatGPT subscription through the official Codex app-server OAuth
+flow.
 
 ## Requirements
 
 - Node.js 22 or newer
-- An OpenAI-compatible chat-completions endpoint
+- One model-provider option:
+  - An OpenAI-compatible chat-completions endpoint and API key
+  - The Codex CLI plus a ChatGPT plan that supports Codex
 
 ## Configure
 
-Copy `.env.example` to `.env`, then set `OPENAI_API_KEY` and `OPENAI_MODEL`.
-`OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`.
+Copy `.env.example` to `.env`, then choose one provider.
 
-PowerShell does not automatically load `.env`, so load the values into the
-backend process before starting development:
+### ChatGPT/Codex subscription
+
+Install the Codex CLI and make sure `codex --version` works in the same shell
+that starts SynthiaClaw. Select subscription mode:
 
 ```powershell
+$env:MODEL_PROVIDER = "codex"
+npm.cmd run dev
+```
+
+Open `http://127.0.0.1:5173` and select **Connect ChatGPT**. SynthiaClaw asks
+the local Codex app-server to start OpenAI's browser OAuth flow. Codex stores
+and refreshes the credentials; OAuth tokens are never sent to the frontend or
+stored in SynthiaClaw's SQLite database.
+
+`CODEX_COMMAND` can point to a specific Codex executable.
+`CODEX_WORKING_DIRECTORY` controls the working directory supplied to Codex and
+defaults to the backend process directory. `CODEX_MODEL` is optional; when it
+is omitted, Codex chooses its configured default model.
+
+Each completion uses an ephemeral, read-only Codex thread with approvals
+disabled. Previously persisted SynthiaClaw messages are injected as
+conversation context, and only the final assistant response is persisted.
+Subscription mode requires a ChatGPT-authenticated Codex account; an API-key
+Codex login is deliberately rejected to prevent accidental API billing.
+
+### OpenAI-compatible API
+
+API-key mode remains the default. Set `OPENAI_API_KEY` and `OPENAI_MODEL`;
+`OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`:
+
+```powershell
+$env:MODEL_PROVIDER = "openai"
 $env:OPENAI_API_KEY = "your-key"
 $env:OPENAI_MODEL = "your-model"
 $env:OPENAI_BASE_URL = "https://api.openai.com/v1"
 npm.cmd run dev
 ```
+
+PowerShell does not automatically load `.env`, so either load these values
+into the backend process as shown or use your preferred environment loader.
 
 The backend binds to `127.0.0.1:3001`, the frontend binds to
 `127.0.0.1:5173`, and SQLite data is stored at `data/synthia.sqlite` by
@@ -45,6 +80,9 @@ npm.cmd run build
 REST endpoints:
 
 - `GET /api/health`
+- `GET /api/provider`
+- `POST /api/provider/codex/login`
+- `POST /api/provider/codex/logout`
 - `GET /api/sessions`
 - `POST /api/sessions`
 - `GET /api/sessions/:id`

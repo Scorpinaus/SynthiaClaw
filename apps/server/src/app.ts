@@ -4,10 +4,12 @@ import { resolve } from "node:path";
 import websocket from "@fastify/websocket";
 import {
   ChatSendEventSchema,
+  CodexLoginResponseSchema,
   CreateSessionRequestSchema,
   ErrorResponseSchema,
   HealthResponseSchema,
   MessageListResponseSchema,
+  ProviderStatusResponseSchema,
   RunFailedEventSchema,
   RunStartedEventSchema,
   AssistantCompletedEventSchema,
@@ -21,14 +23,16 @@ import Fastify, { type FastifyServerOptions } from "fastify";
 
 import {
   ProviderError,
-  createOpenAIProviderFromEnv,
   type ModelProvider,
+  type ProviderRuntime,
 } from "./provider.js";
+import { createProviderRuntimeFromEnv } from "./providerRuntime.js";
 import { ChatRepository, RepositoryError } from "./repository.js";
 
-interface AppDependencies {
+export interface AppDependencies {
   databasePath?: string;
   provider?: ModelProvider;
+  providerRuntime?: ProviderRuntime;
   repository?: ChatRepository;
 }
 
@@ -45,27 +49,60 @@ export function buildApp(
         process.env.DATABASE_PATH ??
         resolve("data", "synthia.sqlite"),
     );
-  let provider: ModelProvider | null = dependencies.provider ?? null;
-  let providerConfigurationError: ProviderError | null = null;
-  if (!provider) {
+  let runtime: ProviderRuntime;
+  if (dependencies.providerRuntime) {
+    runtime = dependencies.providerRuntime;
+  } else if (dependencies.provider) {
+    runtime = {
+      mode: "openai-api",
+      provider: dependencies.provider,
+      close: async () => {},
+    };
+  } else {
     try {
-      provider = createOpenAIProviderFromEnv();
+      runtime = createProviderRuntimeFromEnv();
     } catch (error) {
-      providerConfigurationError =
+      const configurationError =
         error instanceof ProviderError
           ? error
           : new ProviderError(
               "PROVIDER_NOT_CONFIGURED",
               "The model provider is not configured.",
             );
+      runtime = {
+        mode: "openai-api",
+        provider: null,
+        configurationError,
+        close: async () => {},
+      };
     }
   }
+  const provider = runtime.provider;
+  const providerConfigurationError = runtime.configurationError ?? null;
 
   const errorBody = (code: string, message: string) =>
     ErrorResponseSchema.parse({ error: { code, message } });
 
-  app.addHook("onClose", () => {
-    repository.close();
+  const providerErrorReply = (
+    reply: { code(statusCode: number): { send(payload: unknown): unknown } },
+    error: unknown,
+  ) => {
+    const detail =
+      error instanceof ProviderError
+        ? { code: error.code, message: error.message }
+        : {
+            code: "CODEX_REQUEST_FAILED",
+            message: "Codex could not complete the provider request.",
+          };
+    return reply.code(503).send(errorBody(detail.code, detail.message));
+  };
+
+  app.addHook("onClose", async () => {
+    try {
+      await runtime.close();
+    } finally {
+      repository.close();
+    }
   });
 
   app.get("/api/health", async () =>
@@ -75,6 +112,72 @@ export function buildApp(
       timestamp: new Date().toISOString(),
     }),
   );
+
+  app.get("/api/provider", async (_request, reply) => {
+    if (runtime.mode === "openai-api") {
+      return ProviderStatusResponseSchema.parse({
+        mode: runtime.mode,
+        ready: runtime.provider !== null,
+        account: null,
+      });
+    }
+    if (!runtime.accountManager) {
+      return reply
+        .code(503)
+        .send(
+          errorBody(
+            "CODEX_PROVIDER_UNAVAILABLE",
+            "The Codex account manager is unavailable.",
+          ),
+        );
+    }
+    try {
+      return ProviderStatusResponseSchema.parse(
+        await runtime.accountManager.getSubscriptionStatus(),
+      );
+    } catch (error) {
+      return providerErrorReply(reply, error);
+    }
+  });
+
+  app.post("/api/provider/codex/login", async (_request, reply) => {
+    if (runtime.mode !== "codex-subscription" || !runtime.accountManager) {
+      return reply
+        .code(409)
+        .send(
+          errorBody(
+            "CODEX_PROVIDER_DISABLED",
+            "Select the Codex subscription provider before starting OAuth.",
+          ),
+        );
+    }
+    try {
+      return CodexLoginResponseSchema.parse(
+        await runtime.accountManager.startChatGptLogin(),
+      );
+    } catch (error) {
+      return providerErrorReply(reply, error);
+    }
+  });
+
+  app.post("/api/provider/codex/logout", async (_request, reply) => {
+    if (runtime.mode !== "codex-subscription" || !runtime.accountManager) {
+      return reply
+        .code(409)
+        .send(
+          errorBody(
+            "CODEX_PROVIDER_DISABLED",
+            "The Codex subscription provider is not selected.",
+          ),
+        );
+    }
+    try {
+      await runtime.accountManager.logout();
+      return reply.code(204).send();
+    } catch (error) {
+      return providerErrorReply(reply, error);
+    }
+  });
 
   app.get("/api/sessions", async () =>
     SessionListResponseSchema.parse({

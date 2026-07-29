@@ -91,6 +91,48 @@ export const ErrorResponseSchema = z
   })
   .strict();
 
+export const ProviderModeSchema = z.enum([
+  "openai-api",
+  "codex-subscription",
+]);
+
+export const CodexPlanTypeSchema = z.enum([
+  "free",
+  "go",
+  "plus",
+  "pro",
+  "prolite",
+  "team",
+  "self_serve_business_usage_based",
+  "business",
+  "enterprise_cbp_usage_based",
+  "enterprise",
+  "edu",
+  "unknown",
+]);
+
+export const CodexAccountSchema = z
+  .object({
+    email: z.string().email().nullable(),
+    planType: CodexPlanTypeSchema,
+  })
+  .strict();
+
+export const ProviderStatusResponseSchema = z
+  .object({
+    mode: ProviderModeSchema,
+    ready: z.boolean(),
+    account: CodexAccountSchema.nullable(),
+  })
+  .strict();
+
+export const CodexLoginResponseSchema = z
+  .object({
+    loginId: z.string().min(1),
+    authUrl: z.string().url(),
+  })
+  .strict();
+
 export const ChatSendEventSchema = z
   .object({
     type: z.literal("chat.send"),
@@ -144,6 +186,13 @@ export type Message = z.infer<typeof MessageSchema>;
 export type MessagePayload = z.infer<typeof MessagePayloadSchema>;
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>;
 export type ErrorDetail = z.infer<typeof ErrorDetailSchema>;
+export type ProviderMode = z.infer<typeof ProviderModeSchema>;
+export type CodexPlanType = z.infer<typeof CodexPlanTypeSchema>;
+export type CodexAccount = z.infer<typeof CodexAccountSchema>;
+export type ProviderStatusResponse = z.infer<
+  typeof ProviderStatusResponseSchema
+>;
+export type CodexLoginResponse = z.infer<typeof CodexLoginResponseSchema>;
 export type ChatSendEvent = z.infer<typeof ChatSendEventSchema>;
 export type RunStartedEvent = z.infer<typeof RunStartedEventSchema>;
 export type AssistantCompletedEvent = z.infer<

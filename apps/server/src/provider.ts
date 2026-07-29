@@ -1,3 +1,9 @@
+import type {
+  CodexLoginResponse,
+  ProviderMode,
+  ProviderStatusResponse,
+} from "@synthia/shared";
+
 export interface ProviderMessage {
   role: "user" | "assistant";
   content: string;
@@ -5,6 +11,20 @@ export interface ProviderMessage {
 
 export interface ModelProvider {
   complete(messages: ProviderMessage[]): Promise<string>;
+}
+
+export interface CodexAccountManager {
+  getSubscriptionStatus(): Promise<ProviderStatusResponse>;
+  startChatGptLogin(): Promise<CodexLoginResponse>;
+  logout(): Promise<void>;
+}
+
+export interface ProviderRuntime {
+  mode: ProviderMode;
+  provider: ModelProvider | null;
+  accountManager?: CodexAccountManager;
+  configurationError?: ProviderError;
+  close(): Promise<void>;
 }
 
 interface OpenAICompatibleConfig {

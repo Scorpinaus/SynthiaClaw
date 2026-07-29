@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   AssistantCompletedEventSchema,
   ChatSendEventSchema,
+  CodexLoginResponseSchema,
   CreateSessionRequestSchema,
   ErrorResponseSchema,
   HealthResponseSchema,
   MessageSchema,
+  ProviderStatusResponseSchema,
   RunFailedEventSchema,
   RunStartedEventSchema,
   SessionSchema,
@@ -81,6 +83,48 @@ describe("session and message contracts", () => {
       }),
     ).toEqual({
       error: { code: "SESSION_NOT_FOUND", message: "Session was not found." },
+    });
+  });
+});
+
+describe("model provider contracts", () => {
+  it("represents a connected ChatGPT subscription without exposing tokens", () => {
+    expect(
+      ProviderStatusResponseSchema.parse({
+        mode: "codex-subscription",
+        ready: true,
+        account: {
+          email: "person@example.com",
+          planType: "plus",
+        },
+      }),
+    ).toEqual({
+      mode: "codex-subscription",
+      ready: true,
+      account: {
+        email: "person@example.com",
+        planType: "plus",
+      },
+    });
+
+    expect(
+      ProviderStatusResponseSchema.safeParse({
+        mode: "codex-subscription",
+        ready: true,
+        account: null,
+        accessToken: "must-not-cross-the-api-boundary",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates the managed OAuth browser-flow response", () => {
+    expect(
+      CodexLoginResponseSchema.parse({
+        loginId: "019c1234-5678-7abc-8def-0123456789ab",
+        authUrl: "https://auth.openai.com/oauth/authorize?state=opaque",
+      }),
+    ).toMatchObject({
+      loginId: "019c1234-5678-7abc-8def-0123456789ab",
     });
   });
 });

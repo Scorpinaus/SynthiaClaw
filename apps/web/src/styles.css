@@ -144,6 +144,45 @@ button:disabled {
   font-size: 0.75rem;
 }
 
+.provider-status {
+  padding: 0.7rem 0.75rem;
+  border: 1px solid #3e3430;
+  border-radius: 0.75rem;
+  background: #1a1817;
+}
+
+.provider-status--connected {
+  border-color: #265240;
+  background: #10231c;
+}
+
+.provider-status strong {
+  display: block;
+  color: #dce7e8;
+  font-size: 0.75rem;
+}
+
+.provider-status p {
+  margin: 0.25rem 0 0.55rem;
+  color: #8da2a6;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.provider-status button {
+  padding: 0.4rem 0.55rem;
+  border: 1px solid #39736d;
+  border-radius: 0.45rem;
+  background: #173532;
+  font-size: 0.68rem;
+  font-weight: 750;
+}
+
+.provider-status button:hover:not(:disabled) {
+  border-color: #55afa7;
+  background: #204944;
+}
+
 .retry-button,
 .new-session {
   width: 100%;

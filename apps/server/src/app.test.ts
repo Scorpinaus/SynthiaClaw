@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  CodexLoginResponseSchema,
   ErrorResponseSchema,
   HealthResponseSchema,
   MessageListResponseSchema,
+  ProviderStatusResponseSchema,
   ServerWebSocketEventSchema,
   SessionListResponseSchema,
   SessionResponseSchema,
@@ -14,7 +16,11 @@ import {
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app.js";
-import type { ModelProvider } from "./provider.js";
+import type {
+  CodexAccountManager,
+  ModelProvider,
+  ProviderRuntime,
+} from "./provider.js";
 
 const complete = vi.fn<ModelProvider["complete"]>(async (messages) => {
   const latest = messages.at(-1);
@@ -63,6 +69,95 @@ describe("GET /api/health", () => {
     });
 
     expect(response.headers["content-type"]).toContain("application/json");
+  });
+});
+
+describe("model provider REST API", () => {
+  it("reports API-key mode for the existing provider", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/provider",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(ProviderStatusResponseSchema.parse(response.json())).toEqual({
+      mode: "openai-api",
+      ready: true,
+      account: null,
+    });
+  });
+
+  it("starts OAuth, reports the connected subscription, and logs out", async () => {
+    const accountManager: CodexAccountManager = {
+      getSubscriptionStatus: vi.fn().mockResolvedValue({
+        mode: "codex-subscription",
+        ready: true,
+        account: {
+          email: "person@example.com",
+          planType: "plus",
+        },
+      }),
+      startChatGptLogin: vi.fn().mockResolvedValue({
+        loginId: "019c1234-5678-7abc-8def-0123456789ab",
+        authUrl: "https://auth.openai.com/oauth/authorize?state=opaque",
+      }),
+      logout: vi.fn().mockResolvedValue(undefined),
+    };
+    const runtime: ProviderRuntime = {
+      mode: "codex-subscription",
+      provider: { complete },
+      accountManager,
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    const authApp = buildApp(
+      { logger: false },
+      { databasePath: ":memory:", providerRuntime: runtime },
+    );
+
+    try {
+      const statusResponse = await authApp.inject({
+        method: "GET",
+        url: "/api/provider",
+      });
+      expect(
+        ProviderStatusResponseSchema.parse(statusResponse.json()),
+      ).toMatchObject({
+        mode: "codex-subscription",
+        ready: true,
+        account: { planType: "plus" },
+      });
+
+      const loginResponse = await authApp.inject({
+        method: "POST",
+        url: "/api/provider/codex/login",
+      });
+      expect(loginResponse.statusCode).toBe(200);
+      expect(CodexLoginResponseSchema.parse(loginResponse.json())).toEqual({
+        loginId: "019c1234-5678-7abc-8def-0123456789ab",
+        authUrl: "https://auth.openai.com/oauth/authorize?state=opaque",
+      });
+
+      const logoutResponse = await authApp.inject({
+        method: "POST",
+        url: "/api/provider/codex/logout",
+      });
+      expect(logoutResponse.statusCode).toBe(204);
+      expect(accountManager.logout).toHaveBeenCalledOnce();
+    } finally {
+      await authApp.close();
+    }
+  });
+
+  it("does not expose Codex OAuth routes in API-key mode", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/provider/codex/login",
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(ErrorResponseSchema.parse(response.json()).error.code).toBe(
+      "CODEX_PROVIDER_DISABLED",
+    );
   });
 });
 

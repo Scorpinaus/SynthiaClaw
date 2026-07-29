@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspace @synthia/shared && npm run build --workspace @synthia/server && npm run build --workspace @synthia/web",
     "dev": "concurrently -n server,web -c blue,magenta \"npm run dev --workspace @synthia/server\" \"npm run dev --workspace @synthia/web\"",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"

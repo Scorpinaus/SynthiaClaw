@@ -89,6 +89,55 @@ afterEach(() => {
 });
 
 describe("SynthiaClaw chat workspace", () => {
+  it("starts ChatGPT OAuth when the Codex subscription provider is selected", async () => {
+    const openMock = vi.fn();
+    fetchMock.mockImplementation(async (input, init) => {
+      const url = input.toString();
+      if (url === "/api/health") return healthResponse();
+      if (url === "/api/sessions") return jsonResponse({ sessions: [] });
+      if (url === "/api/provider" && !init?.method) {
+        return jsonResponse({
+          mode: "codex-subscription",
+          ready: false,
+          account: null,
+        });
+      }
+      if (
+        url === "/api/provider/codex/login" &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({
+          loginId: "019c1234-5678-7abc-8def-0123456789ab",
+          authUrl: "https://auth.openai.com/oauth/authorize?state=opaque",
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("open", openMock);
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("ChatGPT subscription not connected"),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Connect ChatGPT subscription" }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/provider/codex/login",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(openMock).toHaveBeenCalledWith(
+      "https://auth.openai.com/oauth/authorize?state=opaque",
+      "_blank",
+      "noopener,noreferrer",
+    );
+  });
+
   it("loads persisted sessions and message history", async () => {
     fetchMock.mockImplementation(async (input) => {
       const url = input.toString();

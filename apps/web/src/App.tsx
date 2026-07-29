@@ -1,12 +1,15 @@
 import {
   ChatSendEventSchema,
+  CodexLoginResponseSchema,
   HealthResponseSchema,
   MessageListResponseSchema,
+  ProviderStatusResponseSchema,
   ServerWebSocketEventSchema,
   SessionListResponseSchema,
   SessionResponseSchema,
   type HealthResponse,
   type Message,
+  type ProviderStatusResponse,
   type Session,
 } from "@synthia/shared";
 import {
@@ -48,6 +51,10 @@ export function App() {
   const [composerText, setComposerText] = useState("");
   const [running, setRunning] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [providerStatus, setProviderStatus] =
+    useState<ProviderStatusResponse | null>(null);
+  const [providerActionPending, setProviderActionPending] = useState(false);
+  const [providerNotice, setProviderNotice] = useState<string | null>(null);
   const activeRequest = useRef<AbortController | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const selectedSessionRef = useRef<string | null>(null);
@@ -97,6 +104,22 @@ export function App() {
     });
   }, []);
 
+  const loadProviderStatus = useCallback(async () => {
+    try {
+      const response = await fetch("/api/provider");
+      if (!response.ok) {
+        throw new Error(
+          `Provider request failed with status ${response.status}.`,
+        );
+      }
+      setProviderStatus(
+        ProviderStatusResponseSchema.parse(await response.json()),
+      );
+    } catch {
+      setProviderStatus(null);
+    }
+  }, []);
+
   const loadMessages = useCallback(async (sessionId: string) => {
     const requestNumber = ++historyRequestNumber.current;
     setHistoryState("loading");
@@ -130,15 +153,17 @@ export function App() {
     void loadSessions().catch(() => {
       setSessions([]);
     });
+    void loadProviderStatus();
     const interval = window.setInterval(() => {
       void checkBackend();
+      void loadProviderStatus();
     }, 15_000);
 
     return () => {
       window.clearInterval(interval);
       activeRequest.current?.abort();
     };
-  }, [checkBackend, loadSessions]);
+  }, [checkBackend, loadProviderStatus, loadSessions]);
 
   useEffect(() => {
     selectedSessionRef.current = selectedSessionId;
@@ -255,6 +280,47 @@ export function App() {
     }
   };
 
+  const connectCodexSubscription = async () => {
+    setProviderActionPending(true);
+    setProviderNotice(null);
+    try {
+      const response = await fetch("/api/provider/codex/login", {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`Login request failed with status ${response.status}.`);
+      }
+      const login = CodexLoginResponseSchema.parse(await response.json());
+      window.open(login.authUrl, "_blank", "noopener,noreferrer");
+      setProviderNotice(
+        "Complete sign-in in the browser, then return here. Connection status refreshes automatically.",
+      );
+    } catch {
+      setProviderNotice("ChatGPT subscription sign-in could not be started.");
+    } finally {
+      setProviderActionPending(false);
+    }
+  };
+
+  const disconnectCodexSubscription = async () => {
+    setProviderActionPending(true);
+    setProviderNotice(null);
+    try {
+      const response = await fetch("/api/provider/codex/logout", {
+        method: "POST",
+      });
+      if (!response.ok) {
+        throw new Error(`Logout request failed with status ${response.status}.`);
+      }
+      await loadProviderStatus();
+      setProviderNotice("ChatGPT subscription disconnected.");
+    } catch {
+      setProviderNotice("ChatGPT subscription could not be disconnected.");
+    } finally {
+      setProviderActionPending(false);
+    }
+  };
+
   const sendMessage = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const socket = socketRef.current;
@@ -263,6 +329,8 @@ export function App() {
       !selectedSessionId ||
       !text ||
       running ||
+      (providerStatus?.mode === "codex-subscription" &&
+        !providerStatus.ready) ||
       !socket ||
       socket.readyState !== WebSocket.OPEN
     ) {
@@ -318,6 +386,55 @@ export function App() {
             <span aria-hidden="true" />
             {socketCopy[socketState]}
           </div>
+
+          {providerStatus?.mode === "codex-subscription" ? (
+            <div
+              className={`provider-status ${
+                providerStatus.ready
+                  ? "provider-status--connected"
+                  : "provider-status--disconnected"
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              <strong>
+                {providerStatus.ready
+                  ? "ChatGPT subscription connected"
+                  : "ChatGPT subscription not connected"}
+              </strong>
+              {providerStatus.account ? (
+                <p>
+                  {providerStatus.account.planType} plan
+                  {providerStatus.account.email
+                    ? ` · ${providerStatus.account.email}`
+                    : ""}
+                </p>
+              ) : (
+                <p>Connect through OpenAI OAuth to enable conversations.</p>
+              )}
+              <button
+                type="button"
+                disabled={providerActionPending}
+                aria-label={
+                  providerStatus.ready
+                    ? "Disconnect ChatGPT subscription"
+                    : "Connect ChatGPT subscription"
+                }
+                onClick={() =>
+                  void (providerStatus.ready
+                    ? disconnectCodexSubscription()
+                    : connectCodexSubscription())
+                }
+              >
+                {providerActionPending
+                  ? "Working…"
+                  : providerStatus.ready
+                    ? "Disconnect"
+                    : "Connect ChatGPT"}
+              </button>
+              {providerNotice ? <p>{providerNotice}</p> : null}
+            </div>
+          ) : null}
         </div>
 
         {connectionState === "unavailable" ? (
@@ -423,6 +540,8 @@ export function App() {
                   disabled={
                     running ||
                     socketState !== "connected" ||
+                    (providerStatus?.mode === "codex-subscription" &&
+                      !providerStatus.ready) ||
                     composerText.trim().length === 0
                   }
                 >
