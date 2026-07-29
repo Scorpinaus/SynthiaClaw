@@ -11,6 +11,7 @@ describe("Vite development proxy", () => {
 
     expect(config.server?.proxy?.["/api"]).toMatchObject({
       target: "http://127.0.0.1:3001",
+      ws: true,
     });
   });
 });

@@ -9,3 +9,146 @@ export const HealthResponseSchema = z
   .strict();
 
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
+
+const UuidSchema = z.string().uuid();
+const TimestampSchema = z.string().datetime({ offset: true });
+const RequestIdSchema = z
+  .string()
+  .min(5)
+  .max(128)
+  .regex(/^req_[A-Za-z0-9_-]+$/);
+const RunIdSchema = z
+  .string()
+  .min(5)
+  .max(128)
+  .regex(/^run_[A-Za-z0-9_-]+$/);
+
+export const SessionSchema = z
+  .object({
+    id: UuidSchema,
+    title: z.string().min(1).max(120),
+    createdAt: TimestampSchema,
+    updatedAt: TimestampSchema,
+  })
+  .strict();
+
+export const MessagePayloadSchema = z
+  .object({
+    text: z.string().min(1).max(100_000),
+  })
+  .strict();
+
+export const MessageSchema = z
+  .object({
+    id: UuidSchema,
+    sessionId: UuidSchema,
+    role: z.enum(["user", "assistant"]),
+    payload: MessagePayloadSchema,
+    createdAt: TimestampSchema,
+  })
+  .strict();
+
+export const CreateSessionRequestSchema = z
+  .object({
+    title: z.string().trim().min(1).max(120).optional(),
+  })
+  .strict();
+
+export const SessionParamsSchema = z
+  .object({
+    id: UuidSchema,
+  })
+  .strict();
+
+export const SessionListResponseSchema = z
+  .object({
+    sessions: z.array(SessionSchema),
+  })
+  .strict();
+
+export const SessionResponseSchema = z
+  .object({
+    session: SessionSchema,
+  })
+  .strict();
+
+export const MessageListResponseSchema = z
+  .object({
+    messages: z.array(MessageSchema),
+  })
+  .strict();
+
+export const ErrorDetailSchema = z
+  .object({
+    code: z.string().min(1),
+    message: z.string().min(1),
+  })
+  .strict();
+
+export const ErrorResponseSchema = z
+  .object({
+    error: ErrorDetailSchema,
+  })
+  .strict();
+
+export const ChatSendEventSchema = z
+  .object({
+    type: z.literal("chat.send"),
+    requestId: RequestIdSchema,
+    sessionId: UuidSchema,
+    text: z.string().trim().min(1).max(100_000),
+  })
+  .strict();
+
+export const RunStartedEventSchema = z
+  .object({
+    type: z.literal("run.started"),
+    requestId: RequestIdSchema,
+    runId: RunIdSchema,
+    sessionId: UuidSchema,
+  })
+  .strict();
+
+export const AssistantCompletedEventSchema = z
+  .object({
+    type: z.literal("assistant.completed"),
+    requestId: RequestIdSchema,
+    runId: RunIdSchema,
+    sessionId: UuidSchema,
+    message: MessageSchema,
+  })
+  .strict();
+
+export const RunFailedEventSchema = z
+  .object({
+    type: z.literal("run.failed"),
+    requestId: RequestIdSchema,
+    runId: RunIdSchema,
+    sessionId: UuidSchema,
+    error: ErrorDetailSchema,
+  })
+  .strict();
+
+export const ClientWebSocketEventSchema = z.discriminatedUnion("type", [
+  ChatSendEventSchema,
+]);
+
+export const ServerWebSocketEventSchema = z.discriminatedUnion("type", [
+  RunStartedEventSchema,
+  AssistantCompletedEventSchema,
+  RunFailedEventSchema,
+]);
+
+export type Session = z.infer<typeof SessionSchema>;
+export type Message = z.infer<typeof MessageSchema>;
+export type MessagePayload = z.infer<typeof MessagePayloadSchema>;
+export type CreateSessionRequest = z.infer<typeof CreateSessionRequestSchema>;
+export type ErrorDetail = z.infer<typeof ErrorDetailSchema>;
+export type ChatSendEvent = z.infer<typeof ChatSendEventSchema>;
+export type RunStartedEvent = z.infer<typeof RunStartedEventSchema>;
+export type AssistantCompletedEvent = z.infer<
+  typeof AssistantCompletedEventSchema
+>;
+export type RunFailedEvent = z.infer<typeof RunFailedEventSchema>;
+export type ClientWebSocketEvent = z.infer<typeof ClientWebSocketEventSchema>;
+export type ServerWebSocketEvent = z.infer<typeof ServerWebSocketEventSchema>;
