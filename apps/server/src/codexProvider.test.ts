@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   CodexAppServerClient,
@@ -59,6 +59,12 @@ function respondToInitialization(
     return true;
   }
   return message.method === "initialized";
+}
+
+async function collect(stream: AsyncIterable<string>): Promise<string[]> {
+  const chunks: string[] = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return chunks;
 }
 
 describe("CodexAppServerClient", () => {
@@ -180,6 +186,24 @@ describe("CodexSubscriptionProvider", () => {
           },
         });
         fake.emit({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thr_synthia_1",
+            turnId: "turn_synthia_1",
+            itemId: "item_answer_1",
+            delta: "Subscription-backed ",
+          },
+        });
+        fake.emit({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thr_synthia_1",
+            turnId: "turn_synthia_1",
+            itemId: "item_answer_1",
+            delta: "response",
+          },
+        });
+        fake.emit({
           method: "item/completed",
           params: {
             threadId: "thr_synthia_1",
@@ -212,12 +236,14 @@ describe("CodexSubscriptionProvider", () => {
     });
 
     await expect(
-      provider.complete([
-        { role: "user", content: "Earlier question" },
-        { role: "assistant", content: "Earlier answer" },
-        { role: "user", content: "Current question" },
-      ]),
-    ).resolves.toBe("Subscription-backed response");
+      collect(
+        provider.stream([
+          { role: "user", content: "Earlier question" },
+          { role: "assistant", content: "Earlier answer" },
+          { role: "user", content: "Current question" },
+        ]),
+      ),
+    ).resolves.toEqual(["Subscription-backed ", "response"]);
 
     expect(transport.sent).toContainEqual({
       method: "thread/start",
@@ -278,7 +304,7 @@ describe("CodexSubscriptionProvider", () => {
     );
 
     await expect(
-      provider.complete([{ role: "user", content: "Hello" }]),
+      collect(provider.stream([{ role: "user", content: "Hello" }])),
     ).rejects.toMatchObject({ code: "CODEX_NOT_AUTHENTICATED" });
     expect(
       transport.sent.some((message) => message.method === "thread/start"),
@@ -326,8 +352,7 @@ describe("CodexSubscriptionProvider", () => {
     );
 
     const outcome = await Promise.race([
-      provider
-        .complete([{ role: "user", content: "Hello" }])
+      collect(provider.stream([{ role: "user", content: "Hello" }]))
         .then(() => "resolved")
         .catch((error: unknown) => error),
       new Promise((resolve) => setTimeout(() => resolve("timed-out"), 100)),
@@ -336,6 +361,83 @@ describe("CodexSubscriptionProvider", () => {
     expect(outcome).toBeInstanceOf(Error);
     expect(outcome).toMatchObject({
       message: "Codex exited during the turn.",
+    });
+  });
+
+  it("interrupts the active Codex turn when streaming is cancelled", async () => {
+    const transport = new FakeCodexTransport((message, fake) => {
+      if (respondToInitialization(message, fake)) return;
+      if (!("id" in message)) return;
+      if (message.method === "account/read") {
+        fake.emit({
+          id: message.id,
+          result: {
+            account: {
+              type: "chatgpt",
+              email: "person@example.com",
+              planType: "plus",
+            },
+            requiresOpenaiAuth: true,
+          },
+        });
+      } else if (message.method === "thread/start") {
+        fake.emit({
+          id: message.id,
+          result: { thread: { id: "thr_cancelled" } },
+        });
+      } else if (message.method === "turn/start") {
+        fake.emit({
+          id: message.id,
+          result: {
+            turn: {
+              id: "turn_cancelled",
+              status: "inProgress",
+              items: [],
+            },
+          },
+        });
+      } else if (message.method === "turn/interrupt") {
+        fake.emit({ id: message.id, result: {} });
+        fake.emit({
+          method: "turn/completed",
+          params: {
+            threadId: "thr_cancelled",
+            turn: {
+              id: "turn_cancelled",
+              status: "interrupted",
+              items: [],
+            },
+          },
+        });
+      }
+    });
+    const provider = new CodexSubscriptionProvider(
+      new CodexAppServerClient(transport),
+      { cwd: "D:\\Project\\SynthiaClaw" },
+    );
+    const controller = new AbortController();
+    const pending = collect(
+      provider.stream(
+        [{ role: "user", content: "Stop this turn" }],
+        controller.signal,
+      ),
+    );
+
+    await vi.waitFor(() => {
+      expect(
+        transport.sent.some((message) => message.method === "turn/start"),
+      ).toBe(true);
+    });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(transport.sent).toContainEqual({
+      method: "turn/interrupt",
+      id: expect.any(Number),
+      params: {
+        threadId: "thr_cancelled",
+        turnId: "turn_cancelled",
+      },
     });
   });
 });

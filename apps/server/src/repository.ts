@@ -350,6 +350,21 @@ export class ChatRepository {
       .run(error.code, error.message, now, requestId);
   }
 
+  cancelRun(requestId: string): boolean {
+    const now = new Date().toISOString();
+    const result = this.database
+      .prepare(
+        `UPDATE chat_requests
+         SET status = 'failed',
+             error_code = 'RUN_CANCELLED',
+             error_message = 'The run was cancelled.',
+             updated_at = ?
+         WHERE request_id = ? AND status = 'running'`,
+      )
+      .run(now, requestId);
+    return Number(result.changes) > 0;
+  }
+
   private transaction<T>(operation: () => T): T {
     this.database.exec("BEGIN IMMEDIATE");
     try {

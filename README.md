@@ -2,9 +2,9 @@
 
 SynthiaClaw is a local-first chat workspace with a Fastify backend, React/Vite
 frontend, shared Zod contracts, SQLite conversation persistence, and an
-OpenAI-compatible model provider. Agent conversations can use either an API
-key or a ChatGPT subscription through the official Codex app-server OAuth
-flow.
+OpenAI-compatible streaming model provider. Agent conversations can use either
+an API key or a ChatGPT subscription through the official Codex app-server
+OAuth flow.
 
 ## Requirements
 
@@ -39,9 +39,11 @@ is omitted, Codex chooses its configured default model.
 
 Each completion uses an ephemeral, read-only Codex thread with approvals
 disabled. Previously persisted SynthiaClaw messages are injected as
-conversation context, and only the final assistant response is persisted.
-Subscription mode requires a ChatGPT-authenticated Codex account; an API-key
-Codex login is deliberately rejected to prevent accidental API billing.
+conversation context. Assistant text streams to the UI while the turn runs,
+but only the final assistant response is persisted. Cancelled and disconnected
+runs discard partial assistant text. Subscription mode requires a
+ChatGPT-authenticated Codex account; an API-key Codex login is deliberately
+rejected to prevent accidental API billing.
 
 ### OpenAI-compatible API
 
@@ -90,3 +92,13 @@ REST endpoints:
 
 Chat uses WebSocket endpoint `/api/chat`. Model credentials and SQLite access
 remain backend-only.
+
+The WebSocket protocol uses request and run IDs for correlation:
+
+- Client events: `chat.send`, `run.cancel`
+- Server lifecycle events: `run.started`, `assistant.delta`,
+  `assistant.completed`, `run.cancelled`, `run.failed`
+
+The backend aborts the upstream provider when a run is cancelled or its socket
+disconnects. Request IDs are idempotency keys: retrying a completed request
+replays its terminal event without duplicating either persisted message.

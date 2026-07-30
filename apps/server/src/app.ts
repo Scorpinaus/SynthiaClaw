@@ -3,16 +3,18 @@ import { resolve } from "node:path";
 
 import websocket from "@fastify/websocket";
 import {
-  ChatSendEventSchema,
+  AssistantCompletedEventSchema,
+  AssistantDeltaEventSchema,
+  ClientWebSocketEventSchema,
   CodexLoginResponseSchema,
   CreateSessionRequestSchema,
   ErrorResponseSchema,
   HealthResponseSchema,
   MessageListResponseSchema,
   ProviderStatusResponseSchema,
+  RunCancelledEventSchema,
   RunFailedEventSchema,
   RunStartedEventSchema,
-  AssistantCompletedEventSchema,
   ServerWebSocketEventSchema,
   SessionListResponseSchema,
   SessionParamsSchema,
@@ -252,160 +254,312 @@ export function buildApp(
 
   app.register(async (chatApp) => {
     chatApp.get("/api/chat", { websocket: true }, (socket) => {
-    const send = (event: ServerWebSocketEvent) => {
-      socket.send(JSON.stringify(ServerWebSocketEventSchema.parse(event)));
-    };
+      type ActiveRun = {
+        requestId: string;
+        runId: string;
+        sessionId: string;
+        controller: AbortController;
+        cancelled: boolean;
+        cancelNotified: boolean;
+      };
+      const activeRuns = new Map<string, ActiveRun>();
 
-    socket.on("message", async (rawData: { toString(): string }) => {
-      let input: unknown;
-      try {
-        input = JSON.parse(rawData.toString()) as unknown;
-      } catch {
-        input = null;
-      }
+      const send = (event: ServerWebSocketEvent): boolean => {
+        if (socket.readyState !== 1) return false;
+        try {
+          socket.send(JSON.stringify(ServerWebSocketEventSchema.parse(event)));
+          return true;
+        } catch {
+          return false;
+        }
+      };
 
-      const runId = `run_${randomUUID().replaceAll("-", "")}`;
-      const parsed = ChatSendEventSchema.safeParse(input);
-      if (!parsed.success) {
-        const fallback = getFailureIdentifiers(input);
-        send(
-          RunFailedEventSchema.parse({
-            type: "run.failed",
-            requestId: fallback.requestId,
-            runId,
-            sessionId: fallback.sessionId,
-            error: {
-              code: "VALIDATION_ERROR",
-              message: "The WebSocket message is invalid.",
-            },
-          }),
-        );
-        return;
-      }
+      const cancelActiveRun = (active: ActiveRun, notify: boolean) => {
+        if (active.cancelled) return;
+        active.cancelled = true;
+        activeRuns.delete(active.runId);
+        repository.cancelRun(active.requestId);
+        active.controller.abort();
+        if (notify) {
+          active.cancelNotified = true;
+          send(
+            RunCancelledEventSchema.parse({
+              type: "run.cancelled",
+              requestId: active.requestId,
+              runId: active.runId,
+              sessionId: active.sessionId,
+            }),
+          );
+        }
+      };
 
-      const event = parsed.data;
-      let start;
-      try {
-        start = repository.startRun({
-          requestId: event.requestId,
-          runId,
-          sessionId: event.sessionId,
-          text: event.text,
-        });
-      } catch (error) {
-        const detail =
-          error instanceof RepositoryError
-            ? { code: error.code, message: error.message }
-            : {
-                code: "PERSISTENCE_ERROR",
-                message: "The chat request could not be persisted.",
-              };
-        send(
-          RunFailedEventSchema.parse({
-            type: "run.failed",
+      socket.on("close", () => {
+        for (const active of [...activeRuns.values()]) {
+          cancelActiveRun(active, false);
+        }
+      });
+
+      socket.on("message", async (rawData: { toString(): string }) => {
+        let input: unknown;
+        try {
+          input = JSON.parse(rawData.toString()) as unknown;
+        } catch {
+          input = null;
+        }
+
+        const generatedRunId = `run_${randomUUID().replaceAll("-", "")}`;
+        const parsed = ClientWebSocketEventSchema.safeParse(input);
+        if (!parsed.success) {
+          const fallback = getFailureIdentifiers(input);
+          send(
+            RunFailedEventSchema.parse({
+              type: "run.failed",
+              requestId: fallback.requestId,
+              runId: generatedRunId,
+              sessionId: fallback.sessionId,
+              error: {
+                code: "VALIDATION_ERROR",
+                message: "The WebSocket message is invalid.",
+              },
+            }),
+          );
+          return;
+        }
+
+        const event = parsed.data;
+        if (event.type === "run.cancel") {
+          const active = activeRuns.get(event.runId);
+          if (
+            !active ||
+            active.requestId !== event.requestId ||
+            active.sessionId !== event.sessionId
+          ) {
+            send(
+              RunFailedEventSchema.parse({
+                type: "run.failed",
+                requestId: event.requestId,
+                runId: event.runId,
+                sessionId: event.sessionId,
+                error: {
+                  code: "RUN_NOT_ACTIVE",
+                  message: "The run is no longer active.",
+                },
+              }),
+            );
+            return;
+          }
+          cancelActiveRun(active, true);
+          return;
+        }
+
+        let start;
+        try {
+          start = repository.startRun({
             requestId: event.requestId,
-            runId,
+            runId: generatedRunId,
             sessionId: event.sessionId,
-            error: detail,
-          }),
-        );
-        return;
-      }
+            text: event.text,
+          });
+        } catch (error) {
+          const detail =
+            error instanceof RepositoryError
+              ? { code: error.code, message: error.message }
+              : {
+                  code: "PERSISTENCE_ERROR",
+                  message: "The chat request could not be persisted.",
+                };
+          send(
+            RunFailedEventSchema.parse({
+              type: "run.failed",
+              requestId: event.requestId,
+              runId: generatedRunId,
+              sessionId: event.sessionId,
+              error: detail,
+            }),
+          );
+          return;
+        }
 
-      send(
-        RunStartedEventSchema.parse({
-          type: "run.started",
+        if (start.status !== "started") {
+          send(
+            RunStartedEventSchema.parse({
+              type: "run.started",
+              requestId: event.requestId,
+              runId: start.runId,
+              sessionId: event.sessionId,
+            }),
+          );
+          if (start.status === "completed") {
+            send(
+              AssistantCompletedEventSchema.parse({
+                type: "assistant.completed",
+                requestId: event.requestId,
+                runId: start.runId,
+                sessionId: event.sessionId,
+                message: start.assistantMessage,
+              }),
+            );
+          } else if (
+            start.status === "failed" &&
+            start.error.code === "RUN_CANCELLED"
+          ) {
+            send(
+              RunCancelledEventSchema.parse({
+                type: "run.cancelled",
+                requestId: event.requestId,
+                runId: start.runId,
+                sessionId: event.sessionId,
+              }),
+            );
+          } else {
+            const error =
+              start.status === "failed"
+                ? start.error
+                : {
+                    code: "REQUEST_IN_PROGRESS",
+                    message: "This request is already running.",
+                  };
+            send(
+              RunFailedEventSchema.parse({
+                type: "run.failed",
+                requestId: event.requestId,
+                runId: start.runId,
+                sessionId: event.sessionId,
+                error,
+              }),
+            );
+          }
+          return;
+        }
+
+        const active: ActiveRun = {
           requestId: event.requestId,
           runId: start.runId,
           sessionId: event.sessionId,
-        }),
-      );
+          controller: new AbortController(),
+          cancelled: false,
+          cancelNotified: false,
+        };
+        activeRuns.set(active.runId, active);
+        if (
+          !send(
+            RunStartedEventSchema.parse({
+              type: "run.started",
+              requestId: event.requestId,
+              runId: start.runId,
+              sessionId: event.sessionId,
+            }),
+          )
+        ) {
+          cancelActiveRun(active, false);
+          return;
+        }
 
-      if (start.status === "completed") {
-        send(
-          AssistantCompletedEventSchema.parse({
-            type: "assistant.completed",
-            requestId: event.requestId,
-            runId: start.runId,
-            sessionId: event.sessionId,
-            message: start.assistantMessage,
-          }),
-        );
-        return;
-      }
-      if (start.status === "failed") {
-        send(
-          RunFailedEventSchema.parse({
-            type: "run.failed",
-            requestId: event.requestId,
-            runId: start.runId,
-            sessionId: event.sessionId,
-            error: start.error,
-          }),
-        );
-        return;
-      }
-      if (start.status === "running") {
-        send(
-          RunFailedEventSchema.parse({
-            type: "run.failed",
-            requestId: event.requestId,
-            runId: start.runId,
-            sessionId: event.sessionId,
-            error: {
-              code: "REQUEST_IN_PROGRESS",
-              message: "This request is already running.",
-            },
-          }),
-        );
-        return;
-      }
+        try {
+          if (!provider) {
+            throw (
+              providerConfigurationError ??
+              new ProviderError(
+                "PROVIDER_NOT_CONFIGURED",
+                "The model provider is not configured.",
+              )
+            );
+          }
 
-      try {
-        if (!provider) {
-          throw (
-            providerConfigurationError ??
-            new ProviderError(
-              "PROVIDER_NOT_CONFIGURED",
-              "The model provider is not configured.",
-            )
+          let responseText = "";
+          const messages = repository
+            .listMessages(event.sessionId)
+            .map((message) => ({
+              role: message.role,
+              content: message.payload.text,
+            }));
+          for await (const delta of provider.stream(
+            messages,
+            active.controller.signal,
+          )) {
+            if (active.cancelled || active.controller.signal.aborted) return;
+            if (!delta) continue;
+            responseText += delta;
+            if (responseText.length > 100_000) {
+              throw new ProviderError(
+                "PROVIDER_INVALID_RESPONSE",
+                "The model provider response exceeded the message limit.",
+              );
+            }
+            if (
+              !send(
+                AssistantDeltaEventSchema.parse({
+                  type: "assistant.delta",
+                  requestId: event.requestId,
+                  runId: start.runId,
+                  sessionId: event.sessionId,
+                  delta,
+                }),
+              )
+            ) {
+              cancelActiveRun(active, false);
+              return;
+            }
+          }
+          if (active.cancelled || active.controller.signal.aborted) return;
+          if (!responseText) {
+            throw new ProviderError(
+              "PROVIDER_INVALID_RESPONSE",
+              "The model provider returned no assistant text.",
+            );
+          }
+
+          const message = repository.completeRun(
+            event.requestId,
+            responseText,
+          );
+          activeRuns.delete(active.runId);
+          send(
+            AssistantCompletedEventSchema.parse({
+              type: "assistant.completed",
+              requestId: event.requestId,
+              runId: start.runId,
+              sessionId: event.sessionId,
+              message,
+            }),
+          );
+        } catch (error) {
+          activeRuns.delete(active.runId);
+          if (active.cancelled || active.controller.signal.aborted) {
+            repository.cancelRun(event.requestId);
+            if (!active.cancelNotified) {
+              active.cancelNotified = true;
+              send(
+                RunCancelledEventSchema.parse({
+                  type: "run.cancelled",
+                  requestId: event.requestId,
+                  runId: start.runId,
+                  sessionId: event.sessionId,
+                }),
+              );
+            }
+            return;
+          }
+
+          const detail =
+            error instanceof ProviderError
+              ? { code: error.code, message: error.message }
+              : {
+                  code: "PROVIDER_FAILED",
+                  message:
+                    "The model provider could not complete the request.",
+                };
+          repository.failRun(event.requestId, detail);
+          send(
+            RunFailedEventSchema.parse({
+              type: "run.failed",
+              requestId: event.requestId,
+              runId: start.runId,
+              sessionId: event.sessionId,
+              error: detail,
+            }),
           );
         }
-        const responseText = await provider.complete(
-          repository.listMessages(event.sessionId).map((message) => ({
-            role: message.role,
-            content: message.payload.text,
-          })),
-        );
-        const message = repository.completeRun(event.requestId, responseText);
-        send(
-          AssistantCompletedEventSchema.parse({
-            type: "assistant.completed",
-            requestId: event.requestId,
-            runId: start.runId,
-            sessionId: event.sessionId,
-            message,
-          }),
-        );
-      } catch (error) {
-        const detail =
-          error instanceof ProviderError
-            ? { code: error.code, message: error.message }
-            : {
-                code: "PROVIDER_FAILED",
-                message: "The model provider could not complete the request.",
-              };
-        repository.failRun(event.requestId, detail);
-        send(
-          RunFailedEventSchema.parse({
-            type: "run.failed",
-            requestId: event.requestId,
-            runId: start.runId,
-            sessionId: event.sessionId,
-            error: detail,
-          }),
-        );
-      }
       });
     });
   });

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   AssistantCompletedEventSchema,
+  AssistantDeltaEventSchema,
+  ChatCancelEventSchema,
   ChatSendEventSchema,
   CodexLoginResponseSchema,
   CreateSessionRequestSchema,
@@ -10,6 +12,7 @@ import {
   MessageSchema,
   ProviderStatusResponseSchema,
   RunFailedEventSchema,
+  RunCancelledEventSchema,
   RunStartedEventSchema,
   SessionSchema,
 } from "./index.js";
@@ -146,6 +149,16 @@ describe("WebSocket contracts", () => {
     });
 
     expect(
+      AssistantDeltaEventSchema.parse({
+        type: "assistant.delta",
+        requestId: request.requestId,
+        runId: started.runId,
+        sessionId,
+        delta: "Hello ",
+      }),
+    ).toMatchObject({ type: "assistant.delta", delta: "Hello " });
+
+    expect(
       AssistantCompletedEventSchema.parse({
         type: "assistant.completed",
         requestId: request.requestId,
@@ -172,6 +185,27 @@ describe("WebSocket contracts", () => {
     ).toMatchObject({ type: "run.failed" });
   });
 
+  it("validates cancellation commands and terminal cancellation events", () => {
+    const cancellation = ChatCancelEventSchema.parse({
+      type: "run.cancel",
+      requestId: "req_browser_1",
+      runId: "run_server_1",
+      sessionId,
+    });
+
+    expect(
+      RunCancelledEventSchema.parse({
+        ...cancellation,
+        type: "run.cancelled",
+      }),
+    ).toEqual({
+      type: "run.cancelled",
+      requestId: cancellation.requestId,
+      runId: cancellation.runId,
+      sessionId,
+    });
+  });
+
   it("rejects malformed inbound and outbound events", () => {
     expect(
       ChatSendEventSchema.safeParse({
@@ -187,6 +221,15 @@ describe("WebSocket contracts", () => {
         requestId: "req_1",
         runId: "wrong-prefix",
         sessionId: "not-a-uuid",
+      }).success,
+    ).toBe(false);
+    expect(
+      AssistantDeltaEventSchema.safeParse({
+        type: "assistant.delta",
+        requestId: "req_1",
+        runId: "run_1",
+        sessionId,
+        delta: "",
       }).success,
     ).toBe(false);
   });

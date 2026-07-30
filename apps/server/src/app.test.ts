@@ -22,13 +22,13 @@ import type {
   ProviderRuntime,
 } from "./provider.js";
 
-const complete = vi.fn<ModelProvider["complete"]>(async (messages) => {
+const stream = vi.fn<ModelProvider["stream"]>(async function* (messages) {
   const latest = messages.at(-1);
-  return `Echo: ${latest?.content ?? ""}`;
+  yield `Echo: ${latest?.content ?? ""}`;
 });
 const app = buildApp(
   { logger: false },
-  { databasePath: ":memory:", provider: { complete } },
+  { databasePath: ":memory:", provider: { stream } },
 );
 
 afterAll(async () => {
@@ -36,7 +36,7 @@ afterAll(async () => {
 });
 
 afterEach(() => {
-  complete.mockClear();
+  stream.mockClear();
 });
 
 async function createSession(title: string) {
@@ -105,7 +105,7 @@ describe("model provider REST API", () => {
     };
     const runtime: ProviderRuntime = {
       mode: "codex-subscription",
-      provider: { complete },
+      provider: { stream },
       accountManager,
       close: vi.fn().mockResolvedValue(undefined),
     };
@@ -171,7 +171,7 @@ describe("WebSocket chat API", () => {
         socket.on("error", reject);
         socket.on("message", (data) => {
           events.push(ServerWebSocketEventSchema.parse(JSON.parse(data.toString())));
-          if (events.length === 2) {
+          if (events.length === 3) {
             resolve(events);
           }
         });
@@ -195,6 +195,12 @@ describe("WebSocket chat API", () => {
       sessionId: session.id,
     });
     expect(events[1]).toMatchObject({
+      type: "assistant.delta",
+      requestId: "req_ws_1",
+      sessionId: session.id,
+      delta: "Echo: Hello over WebSocket",
+    });
+    expect(events[2]).toMatchObject({
       type: "assistant.completed",
       requestId: "req_ws_1",
       sessionId: session.id,
@@ -203,9 +209,10 @@ describe("WebSocket chat API", () => {
         payload: { text: "Echo: Hello over WebSocket" },
       },
     });
-    expect(complete).toHaveBeenCalledWith([
-      { role: "user", content: "Hello over WebSocket" },
-    ]);
+    expect(stream).toHaveBeenCalledWith(
+      [{ role: "user", content: "Hello over WebSocket" }],
+      expect.any(AbortSignal),
+    );
 
     const history = await app.inject({
       method: "GET",
@@ -232,14 +239,14 @@ describe("WebSocket chat API", () => {
       text: "Only once",
     };
 
-    const receiveLifecycle = () =>
+    const receiveLifecycle = (eventCount: number) =>
       new Promise<ServerWebSocketEvent[]>((resolve, reject) => {
         const events: ServerWebSocketEvent[] = [];
         const onMessage = (data: { toString(): string }) => {
           events.push(
             ServerWebSocketEventSchema.parse(JSON.parse(data.toString())),
           );
-          if (events.length === 2) {
+          if (events.length === eventCount) {
             socket.off("message", onMessage);
             resolve(events);
           }
@@ -248,10 +255,10 @@ describe("WebSocket chat API", () => {
         socket.on("message", onMessage);
       });
 
-    const firstLifecycle = receiveLifecycle();
+    const firstLifecycle = receiveLifecycle(3);
     socket.send(JSON.stringify(payload));
     await firstLifecycle;
-    const replayLifecycle = receiveLifecycle();
+    const replayLifecycle = receiveLifecycle(2);
     socket.send(JSON.stringify(payload));
     const replay = await replayLifecycle;
     socket.close();
@@ -260,7 +267,7 @@ describe("WebSocket chat API", () => {
       "run.started",
       "assistant.completed",
     ]);
-    expect(complete).toHaveBeenCalledTimes(1);
+    expect(stream).toHaveBeenCalledTimes(1);
 
     const history = await app.inject({
       method: "GET",
@@ -302,22 +309,24 @@ describe("WebSocket chat API", () => {
       sessionId: session.id,
       error: { code: "VALIDATION_ERROR" },
     });
-    expect(complete).not.toHaveBeenCalled();
+    expect(stream).not.toHaveBeenCalled();
   });
 
   it("releases the session lock when the provider fails", async () => {
     const session = await createSession("Provider failure");
-    complete.mockRejectedValueOnce(new Error("provider offline"));
+    stream.mockImplementationOnce(async function* () {
+      throw new Error("provider offline");
+    });
     const socket = await app.injectWS("/api/chat");
 
-    const receiveLifecycle = () =>
+    const receiveLifecycle = (eventCount: number) =>
       new Promise<ServerWebSocketEvent[]>((resolve, reject) => {
         const events: ServerWebSocketEvent[] = [];
         const onMessage = (data: { toString(): string }) => {
           events.push(
             ServerWebSocketEventSchema.parse(JSON.parse(data.toString())),
           );
-          if (events.length === 2) {
+          if (events.length === eventCount) {
             socket.off("message", onMessage);
             resolve(events);
           }
@@ -326,7 +335,7 @@ describe("WebSocket chat API", () => {
         socket.on("message", onMessage);
       });
 
-    const failedLifecycle = receiveLifecycle();
+    const failedLifecycle = receiveLifecycle(2);
     socket.send(
       JSON.stringify({
         type: "chat.send",
@@ -340,7 +349,7 @@ describe("WebSocket chat API", () => {
       error: { code: "PROVIDER_FAILED" },
     });
 
-    const completedLifecycle = receiveLifecycle();
+    const completedLifecycle = receiveLifecycle(3);
     socket.send(
       JSON.stringify({
         type: "chat.send",
@@ -349,8 +358,216 @@ describe("WebSocket chat API", () => {
         text: "Try again",
       }),
     );
-    expect((await completedLifecycle)[1]?.type).toBe("assistant.completed");
+    expect((await completedLifecycle)[2]?.type).toBe("assistant.completed");
     socket.close();
+  });
+
+  it("streams deltas, cancels the provider, and replays cancellation", async () => {
+    let providerAborted = false;
+    const cancellingStream = vi.fn<ModelProvider["stream"]>(
+      async function* (_messages, signal) {
+        yield "Partial response";
+        await new Promise<never>((_resolve, reject) => {
+          const abort = () => {
+            providerAborted = true;
+            reject(new DOMException("The run was cancelled.", "AbortError"));
+          };
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      },
+    );
+    const cancelApp = buildApp(
+      { logger: false },
+      { databasePath: ":memory:", provider: { stream: cancellingStream } },
+    );
+
+    try {
+      const createResponse = await cancelApp.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { title: "Cancellation" },
+      });
+      const session = SessionResponseSchema.parse(
+        createResponse.json(),
+      ).session;
+      const socket = await cancelApp.injectWS("/api/chat");
+      const receiveEvents = (eventCount: number) =>
+        new Promise<ServerWebSocketEvent[]>((resolve, reject) => {
+          const events: ServerWebSocketEvent[] = [];
+          const onMessage = (data: { toString(): string }) => {
+            events.push(
+              ServerWebSocketEventSchema.parse(JSON.parse(data.toString())),
+            );
+            if (events.length === eventCount) {
+              socket.off("message", onMessage);
+              resolve(events);
+            }
+          };
+          socket.once("error", reject);
+          socket.on("message", onMessage);
+        });
+      const request = {
+        type: "chat.send",
+        requestId: "req_cancel_ws_1",
+        sessionId: session.id,
+        text: "Stop this response",
+      };
+
+      const partialLifecycle = receiveEvents(2);
+      socket.send(JSON.stringify(request));
+      const [started, delta] = await partialLifecycle;
+      expect(delta).toMatchObject({
+        type: "assistant.delta",
+        delta: "Partial response",
+      });
+      expect(started.type).toBe("run.started");
+      if (started.type !== "run.started") {
+        throw new Error("Expected a run.started event.");
+      }
+
+      const cancelledEvent = receiveEvents(1);
+      socket.send(
+        JSON.stringify({
+          type: "run.cancel",
+          requestId: request.requestId,
+          runId: started.runId,
+          sessionId: session.id,
+        }),
+      );
+      await expect(cancelledEvent).resolves.toMatchObject([
+        {
+          type: "run.cancelled",
+          requestId: request.requestId,
+          runId: started.runId,
+          sessionId: session.id,
+        },
+      ]);
+      await vi.waitFor(() => expect(providerAborted).toBe(true));
+
+      const replayLifecycle = receiveEvents(2);
+      socket.send(JSON.stringify(request));
+      await expect(replayLifecycle).resolves.toMatchObject([
+        { type: "run.started", runId: started.runId },
+        { type: "run.cancelled", runId: started.runId },
+      ]);
+      expect(cancellingStream).toHaveBeenCalledTimes(1);
+
+      const history = await cancelApp.inject({
+        method: "GET",
+        url: `/api/sessions/${session.id}/messages`,
+      });
+      expect(
+        MessageListResponseSchema.parse(history.json()).messages,
+      ).toMatchObject([
+        { role: "user", payload: { text: "Stop this response" } },
+      ]);
+      socket.close();
+    } finally {
+      await cancelApp.close();
+    }
+  });
+
+  it("aborts an in-flight provider run when its WebSocket disconnects", async () => {
+    let callCount = 0;
+    let resolveAbort!: () => void;
+    const abortObserved = new Promise<void>((resolve) => {
+      resolveAbort = resolve;
+    });
+    const disconnectStream = vi.fn<ModelProvider["stream"]>(
+      async function* (_messages, signal) {
+        callCount += 1;
+        if (callCount > 1) {
+          yield "Recovered";
+          return;
+        }
+        yield "Still running";
+        await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              resolveAbort();
+              reject(
+                new DOMException("The socket disconnected.", "AbortError"),
+              );
+            },
+            { once: true },
+          );
+        });
+      },
+    );
+    const disconnectApp = buildApp(
+      { logger: false },
+      { databasePath: ":memory:", provider: { stream: disconnectStream } },
+    );
+
+    try {
+      const createResponse = await disconnectApp.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { title: "Disconnect" },
+      });
+      const session = SessionResponseSchema.parse(
+        createResponse.json(),
+      ).session;
+      const socket = await disconnectApp.injectWS("/api/chat");
+      const partialLifecycle = new Promise<ServerWebSocketEvent[]>(
+        (resolve, reject) => {
+          const events: ServerWebSocketEvent[] = [];
+          socket.once("error", reject);
+          socket.on("message", (data) => {
+            events.push(
+              ServerWebSocketEventSchema.parse(JSON.parse(data.toString())),
+            );
+            if (events.length === 2) resolve(events);
+          });
+        },
+      );
+      socket.send(
+        JSON.stringify({
+          type: "chat.send",
+          requestId: "req_disconnect_1",
+          sessionId: session.id,
+          text: "Keep going",
+        }),
+      );
+      expect((await partialLifecycle)[1]).toMatchObject({
+        type: "assistant.delta",
+        delta: "Still running",
+      });
+      socket.terminate();
+      await abortObserved;
+
+      const recoverySocket = await disconnectApp.injectWS("/api/chat");
+      const recoveredLifecycle = new Promise<ServerWebSocketEvent[]>(
+        (resolve, reject) => {
+          const events: ServerWebSocketEvent[] = [];
+          recoverySocket.once("error", reject);
+          recoverySocket.on("message", (data) => {
+            events.push(
+              ServerWebSocketEventSchema.parse(JSON.parse(data.toString())),
+            );
+            if (events.length === 3) resolve(events);
+          });
+        },
+      );
+      recoverySocket.send(
+        JSON.stringify({
+          type: "chat.send",
+          requestId: "req_disconnect_recovery_1",
+          sessionId: session.id,
+          text: "Try again",
+        }),
+      );
+      expect((await recoveredLifecycle).map((event) => event.type)).toEqual([
+        "run.started",
+        "assistant.delta",
+        "assistant.completed",
+      ]);
+      recoverySocket.close();
+    } finally {
+      await disconnectApp.close();
+    }
   });
 });
 
@@ -360,7 +577,7 @@ describe("conversation persistence", () => {
     const databasePath = join(directory, "chat.sqlite");
     const firstApp = buildApp(
       { logger: false },
-      { databasePath, provider: { complete } },
+      { databasePath, provider: { stream } },
     );
     let firstAppClosed = false;
 
@@ -399,7 +616,7 @@ describe("conversation persistence", () => {
 
       const restartedApp = buildApp(
         { logger: false },
-        { databasePath, provider: { complete } },
+        { databasePath, provider: { stream } },
       );
       try {
         const sessionsResponse = await restartedApp.inject({

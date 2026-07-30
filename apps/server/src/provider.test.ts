@@ -9,14 +9,33 @@ import {
 } from "./provider.js";
 import { createProviderRuntimeFromEnv } from "./providerRuntime.js";
 
+async function collect(stream: AsyncIterable<string>): Promise<string[]> {
+  const chunks: string[] = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return chunks;
+}
+
 describe("OpenAICompatibleProvider", () => {
-  it("sends an OpenAI-compatible non-streaming completion request", async () => {
+  it("streams OpenAI-compatible SSE deltas across response chunks", async () => {
+    const encoder = new TextEncoder();
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
-        JSON.stringify({
-          choices: [{ message: { content: "Deterministic response" } }],
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                'data: {"choices":[{"delta":{"content":"Deter"}}]}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'data: {"choices":[{"delta":{"content":"ministic response"}}]}\n\ndata: [DONE]\n\n',
+              ),
+            );
+            controller.close();
+          },
         }),
-        { headers: { "Content-Type": "application/json" }, status: 200 },
+        { headers: { "Content-Type": "text/event-stream" }, status: 200 },
       ),
     );
     const provider = new OpenAICompatibleProvider(
@@ -28,12 +47,18 @@ describe("OpenAICompatibleProvider", () => {
       fetchMock,
     );
 
+    const controller = new AbortController();
     await expect(
-      provider.complete([
-        { role: "user", content: "Hello" },
-        { role: "assistant", content: "Hi" },
-      ]),
-    ).resolves.toBe("Deterministic response");
+      collect(
+        provider.stream(
+          [
+            { role: "user", content: "Hello" },
+            { role: "assistant", content: "Hi" },
+          ],
+          controller.signal,
+        ),
+      ),
+    ).resolves.toEqual(["Deter", "ministic response"]);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "https://models.example.test/v1/chat/completions",
@@ -43,16 +68,61 @@ describe("OpenAICompatibleProvider", () => {
           Authorization: "Bearer server-secret",
           "Content-Type": "application/json",
         }),
+        signal: controller.signal,
         body: JSON.stringify({
           model: "example-model",
           messages: [
             { role: "user", content: "Hello" },
             { role: "assistant", content: "Hi" },
           ],
-          stream: false,
+          stream: true,
         }),
       }),
     );
+  });
+
+  it("stops reading the upstream response when aborted", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(
+      async (_input, init) =>
+        new Response(
+          new ReadableStream({
+            start(streamController) {
+              streamController.enqueue(
+                encoder.encode(
+                  'data: {"choices":[{"delta":{"content":"Partial"}}]}\n\n',
+                ),
+              );
+              init?.signal?.addEventListener("abort", () => {
+                streamController.error(
+                  new DOMException("The operation was aborted.", "AbortError"),
+                );
+              });
+            },
+          }),
+          { headers: { "Content-Type": "text/event-stream" }, status: 200 },
+        ),
+    );
+    const provider = new OpenAICompatibleProvider(
+      {
+        apiKey: "server-secret",
+        baseUrl: "https://models.example.test/v1",
+        model: "example-model",
+      },
+      fetchMock,
+    );
+    const controller = new AbortController();
+    const iterator = provider.stream(
+      [{ role: "user", content: "Hello" }],
+      controller.signal,
+    )[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: "Partial",
+    });
+    controller.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ name: "AbortError" });
   });
 
   it("reports missing server configuration without exposing credentials", () => {
@@ -63,7 +133,7 @@ describe("OpenAICompatibleProvider", () => {
     );
   });
 
-  it("turns HTTP and malformed-response failures into understandable errors", async () => {
+  it("turns HTTP and malformed-stream failures into understandable errors", async () => {
     const rejected = new OpenAICompatibleProvider(
       {
         apiKey: "secret",
@@ -74,8 +144,9 @@ describe("OpenAICompatibleProvider", () => {
         .fn<typeof fetch>()
         .mockResolvedValue(new Response("upstream unavailable", { status: 503 })),
     );
-    await expect(rejected.complete([{ role: "user", content: "Hello" }])).rejects
-      .toMatchObject({ code: "PROVIDER_REQUEST_FAILED" });
+    await expect(
+      collect(rejected.stream([{ role: "user", content: "Hello" }])),
+    ).rejects.toMatchObject({ code: "PROVIDER_REQUEST_FAILED" });
 
     const malformed = new OpenAICompatibleProvider(
       {
@@ -83,14 +154,20 @@ describe("OpenAICompatibleProvider", () => {
         baseUrl: "https://models.example.test/v1",
         model: "model",
       },
-      vi
-        .fn<typeof fetch>()
-        .mockResolvedValue(
-          new Response(JSON.stringify({ choices: [] }), { status: 200 }),
-        ),
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response('data: {"choices":[]}\n\ndata: [DONE]\n\n', {
+          headers: { "Content-Type": "text/event-stream" },
+          status: 200,
+        }),
+      ),
     );
-    await expect(malformed.complete([{ role: "user", content: "Hello" }])).rejects
-      .toMatchObject({ code: "PROVIDER_INVALID_RESPONSE" });
+    await expect(
+      collect(
+        malformed.stream([
+          { role: "user", content: "Hello" },
+        ]),
+      ),
+    ).rejects.toMatchObject({ code: "PROVIDER_INVALID_RESPONSE" });
   });
 });
 

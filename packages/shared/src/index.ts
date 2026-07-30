@@ -142,12 +142,31 @@ export const ChatSendEventSchema = z
   })
   .strict();
 
+export const ChatCancelEventSchema = z
+  .object({
+    type: z.literal("run.cancel"),
+    requestId: RequestIdSchema,
+    runId: RunIdSchema,
+    sessionId: UuidSchema,
+  })
+  .strict();
+
 export const RunStartedEventSchema = z
   .object({
     type: z.literal("run.started"),
     requestId: RequestIdSchema,
     runId: RunIdSchema,
     sessionId: UuidSchema,
+  })
+  .strict();
+
+export const AssistantDeltaEventSchema = z
+  .object({
+    type: z.literal("assistant.delta"),
+    requestId: RequestIdSchema,
+    runId: RunIdSchema,
+    sessionId: UuidSchema,
+    delta: z.string().min(1).max(100_000),
   })
   .strict();
 
@@ -158,6 +177,15 @@ export const AssistantCompletedEventSchema = z
     runId: RunIdSchema,
     sessionId: UuidSchema,
     message: MessageSchema,
+  })
+  .strict();
+
+export const RunCancelledEventSchema = z
+  .object({
+    type: z.literal("run.cancelled"),
+    requestId: RequestIdSchema,
+    runId: RunIdSchema,
+    sessionId: UuidSchema,
   })
   .strict();
 
@@ -173,11 +201,14 @@ export const RunFailedEventSchema = z
 
 export const ClientWebSocketEventSchema = z.discriminatedUnion("type", [
   ChatSendEventSchema,
+  ChatCancelEventSchema,
 ]);
 
 export const ServerWebSocketEventSchema = z.discriminatedUnion("type", [
   RunStartedEventSchema,
+  AssistantDeltaEventSchema,
   AssistantCompletedEventSchema,
+  RunCancelledEventSchema,
   RunFailedEventSchema,
 ]);
 
@@ -194,10 +225,13 @@ export type ProviderStatusResponse = z.infer<
 >;
 export type CodexLoginResponse = z.infer<typeof CodexLoginResponseSchema>;
 export type ChatSendEvent = z.infer<typeof ChatSendEventSchema>;
+export type ChatCancelEvent = z.infer<typeof ChatCancelEventSchema>;
 export type RunStartedEvent = z.infer<typeof RunStartedEventSchema>;
+export type AssistantDeltaEvent = z.infer<typeof AssistantDeltaEventSchema>;
 export type AssistantCompletedEvent = z.infer<
   typeof AssistantCompletedEventSchema
 >;
+export type RunCancelledEvent = z.infer<typeof RunCancelledEventSchema>;
 export type RunFailedEvent = z.infer<typeof RunFailedEventSchema>;
 export type ClientWebSocketEvent = z.infer<typeof ClientWebSocketEventSchema>;
 export type ServerWebSocketEvent = z.infer<typeof ServerWebSocketEventSchema>;

@@ -10,7 +10,10 @@ export interface ProviderMessage {
 }
 
 export interface ModelProvider {
-  complete(messages: ProviderMessage[]): Promise<string>;
+  stream(
+    messages: ProviderMessage[],
+    signal: AbortSignal,
+  ): AsyncIterable<string>;
 }
 
 export interface CodexAccountManager {
@@ -49,7 +52,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
     private readonly fetchImplementation: typeof fetch = fetch,
   ) {}
 
-  async complete(messages: ProviderMessage[]): Promise<string> {
+  async *stream(
+    messages: ProviderMessage[],
+    signal: AbortSignal = new AbortController().signal,
+  ): AsyncIterable<string> {
     let response: Response;
     try {
       response = await this.fetchImplementation(
@@ -63,11 +69,13 @@ export class OpenAICompatibleProvider implements ModelProvider {
           body: JSON.stringify({
             model: this.config.model,
             messages,
-            stream: false,
+            stream: true,
           }),
+          signal,
         },
       );
-    } catch {
+    } catch (error) {
+      if (signal.aborted) throw error;
       throw new ProviderError(
         "PROVIDER_REQUEST_FAILED",
         "The model provider could not be reached.",
@@ -81,28 +89,90 @@ export class OpenAICompatibleProvider implements ModelProvider {
       );
     }
 
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
+    if (!response.body) {
       throw new ProviderError(
         "PROVIDER_INVALID_RESPONSE",
-        "The model provider returned invalid JSON.",
+        "The model provider response did not contain a stream.",
       );
     }
 
-    const content = readCompletionContent(body);
-    if (!content) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let emittedText = false;
+    let reachedDone = false;
+
+    const readEvent = (block: string): string | null => {
+      const data = block
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!data) return null;
+      if (data.trim() === "[DONE]") {
+        reachedDone = true;
+        return null;
+      }
+
+      let payload: unknown;
+      try {
+        payload = JSON.parse(data) as unknown;
+      } catch {
+        throw new ProviderError(
+          "PROVIDER_INVALID_RESPONSE",
+          "The model provider returned an invalid streaming event.",
+        );
+      }
+      return readDeltaContent(payload);
+    };
+
+    try {
+      while (!reachedDone) {
+        const result = await reader.read();
+        if (result.done) {
+          buffer += decoder.decode();
+          break;
+        }
+        buffer = `${buffer}${decoder.decode(result.value, { stream: true })}`.replaceAll(
+          "\r\n",
+          "\n",
+        );
+
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const delta = readEvent(block);
+          if (delta) {
+            emittedText = true;
+            yield delta;
+          }
+          if (reachedDone) break;
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+
+      if (!reachedDone && buffer.trim()) {
+        const delta = readEvent(buffer);
+        if (delta) {
+          emittedText = true;
+          yield delta;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (!emittedText) {
       throw new ProviderError(
         "PROVIDER_INVALID_RESPONSE",
-        "The model provider response did not contain assistant text.",
+        "The model provider stream did not contain assistant text.",
       );
     }
-    return content;
   }
 }
 
-function readCompletionContent(body: unknown): string | null {
+function readDeltaContent(body: unknown): string | null {
   if (typeof body !== "object" || body === null || !("choices" in body)) {
     return null;
   }
@@ -114,16 +184,16 @@ function readCompletionContent(body: unknown): string | null {
   if (
     typeof first !== "object" ||
     first === null ||
-    !("message" in first) ||
-    typeof first.message !== "object" ||
-    first.message === null ||
-    !("content" in first.message) ||
-    typeof first.message.content !== "string" ||
-    first.message.content.length === 0
+    !("delta" in first) ||
+    typeof first.delta !== "object" ||
+    first.delta === null ||
+    !("content" in first.delta) ||
+    typeof first.delta.content !== "string" ||
+    first.delta.content.length === 0
   ) {
     return null;
   }
-  return first.message.content;
+  return first.delta.content;
 }
 
 export function createOpenAIProviderFromEnv(

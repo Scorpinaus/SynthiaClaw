@@ -78,6 +78,9 @@ describe("ChatRepository run invariants", () => {
 
     expect(repository.startRun(input).status).toBe("started");
     const assistant = repository.completeRun(input.requestId, "One response");
+    expect(repository.completeRun(input.requestId, "Ignored duplicate")).toEqual(
+      assistant,
+    );
     const duplicate = repository.startRun(input);
 
     expect(duplicate).toMatchObject({
@@ -86,6 +89,45 @@ describe("ChatRepository run invariants", () => {
       assistantMessage: assistant,
     });
     expect(repository.listMessages(session.id)).toHaveLength(2);
+  });
+
+  it("cancels an active run idempotently without persisting partial assistant text", () => {
+    const repository = openMemoryRepository();
+    const session = repository.createSession("Cancellation");
+    const input = {
+      requestId: "req_cancel_1",
+      runId: "run_cancel_1",
+      sessionId: session.id,
+      text: "Stop this",
+    };
+    repository.startRun(input);
+
+    expect(repository.cancelRun(input.requestId)).toBe(true);
+    expect(repository.cancelRun(input.requestId)).toBe(false);
+    expect(repository.startRun(input)).toMatchObject({
+      status: "failed",
+      runId: input.runId,
+      error: { code: "RUN_CANCELLED" },
+    });
+    expect(() =>
+      repository.completeRun(input.requestId, "Late provider response"),
+    ).toThrowError(
+      expect.objectContaining<Partial<RepositoryError>>({
+        code: "RUN_NOT_ACTIVE",
+      }),
+    );
+    expect(repository.listMessages(session.id)).toMatchObject([
+      { role: "user", payload: { text: "Stop this" } },
+    ]);
+
+    expect(
+      repository.startRun({
+        requestId: "req_after_cancel_1",
+        runId: "run_after_cancel_1",
+        sessionId: session.id,
+        text: "Try again",
+      }).status,
+    ).toBe("started");
   });
 
   it("allows at most one active run per session and unlocks after failure", () => {

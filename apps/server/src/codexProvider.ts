@@ -148,6 +148,55 @@ export class StdioCodexTransport implements CodexTransport {
 type NotificationListener = (message: JsonRpcMessage) => void;
 type ExitListener = (error: Error) => void;
 
+class AsyncTextQueue implements AsyncIterable<string> {
+  private readonly values: string[] = [];
+  private readonly waiters: Array<{
+    resolve: (result: IteratorResult<string>) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  private ended = false;
+  private error: Error | null = null;
+
+  push(value: string): void {
+    if (this.ended || this.error) return;
+    const waiter = this.waiters.shift();
+    if (waiter) waiter.resolve({ done: false, value });
+    else this.values.push(value);
+  }
+
+  end(): void {
+    if (this.ended || this.error) return;
+    this.ended = true;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.resolve({ done: true, value: undefined });
+    }
+  }
+
+  fail(error: Error): void {
+    if (this.ended || this.error) return;
+    this.error = error;
+    for (const waiter of this.waiters.splice(0)) waiter.reject(error);
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<string> {
+    return {
+      next: () => {
+        const value = this.values.shift();
+        if (value !== undefined) {
+          return Promise.resolve({ done: false, value });
+        }
+        if (this.error) return Promise.reject(this.error);
+        if (this.ended) {
+          return Promise.resolve({ done: true, value: undefined });
+        }
+        return new Promise((resolve, reject) => {
+          this.waiters.push({ resolve, reject });
+        });
+      },
+    };
+  }
+}
+
 export class CodexAppServerClient implements CodexAccountManager {
   private nextId = 1;
   private startPromise: Promise<void> | null = null;
@@ -252,21 +301,28 @@ export class CodexAppServerClient implements CodexAccountManager {
     });
   }
 
-  async completeTurn(threadId: string, text: string): Promise<string> {
+  async *streamTurn(
+    threadId: string,
+    text: string,
+    signal: AbortSignal,
+  ): AsyncIterable<string> {
     let turnId: string | null = null;
     let completedTurn: Record<string, unknown> | null = null;
-    let assistantText: string | null = null;
-    let resolveCompletion!: (value: string) => void;
-    let rejectCompletion!: (error: Error) => void;
-    const completion = new Promise<string>((resolve, reject) => {
-      resolveCompletion = resolve;
-      rejectCompletion = reject;
-    });
+    const finalTextByTurn = new Map<string, string>();
+    const pendingDeltas: Array<{ turnId: string; delta: string }> = [];
+    const queue = new AsyncTextQueue();
+    let sawDelta = false;
+    let abortRequested = signal.aborted;
+    let interruptSent = false;
 
     const finishIfReady = () => {
       if (!turnId || !completedTurn || completedTurn.id !== turnId) return;
+      if (abortRequested) {
+        queue.fail(new DOMException("The run was cancelled.", "AbortError"));
+        return;
+      }
       if (completedTurn.status !== "completed") {
-        rejectCompletion(
+        queue.fail(
           new ProviderError(
             "CODEX_TURN_FAILED",
             readTurnFailure(completedTurn),
@@ -274,8 +330,13 @@ export class CodexAppServerClient implements CodexAccountManager {
         );
         return;
       }
-      if (!assistantText) {
-        rejectCompletion(
+      const finalText = finalTextByTurn.get(turnId);
+      if (!sawDelta && finalText) {
+        sawDelta = true;
+        queue.push(finalText);
+      }
+      if (!sawDelta) {
+        queue.fail(
           new ProviderError(
             "PROVIDER_INVALID_RESPONSE",
             "Codex completed the turn without assistant text.",
@@ -283,21 +344,56 @@ export class CodexAppServerClient implements CodexAccountManager {
         );
         return;
       }
-      resolveCompletion(assistantText);
+      queue.end();
+    };
+
+    const interrupt = () => {
+      abortRequested = true;
+      if (turnId && !interruptSent) {
+        interruptSent = true;
+        void this.request("turn/interrupt", { threadId, turnId }).catch(
+          () => undefined,
+        );
+      }
+      queue.fail(new DOMException("The run was cancelled.", "AbortError"));
     };
 
     const unsubscribe = this.subscribe((message) => {
+      if (message.method === "item/agentMessage/delta") {
+        const params = asOptionalRecord(message.params);
+        if (
+          params?.threadId === threadId &&
+          typeof params.turnId === "string" &&
+          typeof params.delta === "string" &&
+          params.delta.length > 0
+        ) {
+          if (params.turnId === turnId && !abortRequested) {
+            sawDelta = true;
+            queue.push(params.delta);
+          } else if (!turnId) {
+            pendingDeltas.push({
+              turnId: params.turnId,
+              delta: params.delta,
+            });
+          }
+        }
+      }
       if (message.method === "item/completed") {
         const params = asOptionalRecord(message.params);
         const item = asOptionalRecord(params?.item);
         if (
           params?.threadId === threadId &&
+          typeof params.turnId === "string" &&
           item?.type === "agentMessage" &&
           typeof item.text === "string" &&
-          item.text.length > 0 &&
-          (item.phase === "final_answer" || assistantText === null)
+          item.text.length > 0
         ) {
-          assistantText = item.text;
+          if (
+            item.phase === "final_answer" ||
+            !finalTextByTurn.has(params.turnId)
+          ) {
+            finalTextByTurn.set(params.turnId, item.text);
+          }
         }
       }
       if (message.method === "turn/completed") {
@@ -310,8 +406,9 @@ export class CodexAppServerClient implements CodexAccountManager {
       }
     });
     const unsubscribeExit = this.subscribeToExit((error) => {
-      rejectCompletion(error);
+      queue.fail(error);
     });
+    signal.addEventListener("abort", interrupt, { once: true });
 
     try {
       const result = asRecord(
@@ -328,9 +425,17 @@ export class CodexAppServerClient implements CodexAccountManager {
         );
       }
       turnId = turn.id;
+      for (const pending of pendingDeltas) {
+        if (pending.turnId === turnId && !abortRequested) {
+          sawDelta = true;
+          queue.push(pending.delta);
+        }
+      }
+      if (abortRequested) interrupt();
       finishIfReady();
-      return await completion;
+      for await (const delta of queue) yield delta;
     } finally {
+      signal.removeEventListener("abort", interrupt);
       unsubscribe();
       unsubscribeExit();
     }
@@ -445,7 +550,10 @@ export class CodexSubscriptionProvider implements ModelProvider {
     private readonly options: CodexSubscriptionProviderOptions,
   ) {}
 
-  async complete(messages: ProviderMessage[]): Promise<string> {
+  async *stream(
+    messages: ProviderMessage[],
+    signal: AbortSignal = new AbortController().signal,
+  ): AsyncIterable<string> {
     const current = messages.at(-1);
     if (!current || current.role !== "user") {
       throw new ProviderError(
@@ -454,6 +562,7 @@ export class CodexSubscriptionProvider implements ModelProvider {
       );
     }
 
+    signal.throwIfAborted();
     const status = await this.client.getSubscriptionStatus();
     if (!status.ready || !status.account) {
       throw new ProviderError(
@@ -462,9 +571,11 @@ export class CodexSubscriptionProvider implements ModelProvider {
       );
     }
 
+    signal.throwIfAborted();
     const threadId = await this.client.startThread(this.options);
+    signal.throwIfAborted();
     await this.client.injectItems(threadId, messages.slice(0, -1));
-    return this.client.completeTurn(threadId, current.content);
+    yield* this.client.streamTurn(threadId, current.content, signal);
   }
 }
 

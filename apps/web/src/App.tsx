@@ -1,4 +1,5 @@
 import {
+  ChatCancelEventSchema,
   ChatSendEventSchema,
   CodexLoginResponseSchema,
   HealthResponseSchema,
@@ -23,6 +24,11 @@ import {
 type ConnectionState = "checking" | "connected" | "unavailable";
 type SocketState = "connecting" | "connected" | "disconnected";
 type HistoryState = "idle" | "loading" | "ready" | "failed";
+type ActiveRun = {
+  requestId: string;
+  runId: string | null;
+  sessionId: string;
+};
 
 const connectionCopy: Record<ConnectionState, string> = {
   checking: "Checking backend...",
@@ -49,16 +55,19 @@ export function App() {
   const [socketState, setSocketState] =
     useState<SocketState>("connecting");
   const [composerText, setComposerText] = useState("");
-  const [running, setRunning] = useState(false);
+  const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
+  const [streamedText, setStreamedText] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [providerStatus, setProviderStatus] =
     useState<ProviderStatusResponse | null>(null);
   const [providerActionPending, setProviderActionPending] = useState(false);
   const [providerNotice, setProviderNotice] = useState<string | null>(null);
   const activeRequest = useRef<AbortController | null>(null);
+  const activeRunRef = useRef<ActiveRun | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const selectedSessionRef = useRef<string | null>(null);
   const historyRequestNumber = useRef(0);
+  const running = activeRun !== null;
 
   const checkBackend = useCallback(async () => {
     activeRequest.current?.abort();
@@ -169,7 +178,7 @@ export function App() {
     selectedSessionRef.current = selectedSessionId;
     setMessages([]);
     setChatError(null);
-    setRunning(false);
+    setStreamedText("");
     if (selectedSessionId) {
       void loadMessages(selectedSessionId);
     } else {
@@ -180,6 +189,12 @@ export function App() {
   useEffect(() => {
     let disposed = false;
     let reconnectTimer: number | null = null;
+
+    const clearActiveRun = () => {
+      activeRunRef.current = null;
+      setActiveRun(null);
+      setStreamedText("");
+    };
 
     const connect = () => {
       if (disposed) return;
@@ -212,21 +227,47 @@ export function App() {
         if (event.sessionId !== selectedSessionRef.current) {
           return;
         }
+        const current = activeRunRef.current;
         if (event.type === "run.started") {
-          setRunning(true);
+          if (!current || current.requestId !== event.requestId) return;
+          const startedRun: ActiveRun = {
+            requestId: event.requestId,
+            runId: event.runId,
+            sessionId: event.sessionId,
+          };
+          activeRunRef.current = startedRun;
+          setActiveRun(startedRun);
+          setStreamedText("");
           setChatError(null);
           void loadMessages(event.sessionId);
           return;
         }
+        if (
+          !current ||
+          current.requestId !== event.requestId ||
+          (current.runId !== null && current.runId !== event.runId)
+        ) {
+          return;
+        }
+        if (event.type === "assistant.delta") {
+          setStreamedText((text) => `${text}${event.delta}`);
+          return;
+        }
         if (event.type === "assistant.completed") {
-          setRunning(false);
+          clearActiveRun();
           setChatError(null);
           void loadMessages(event.sessionId);
           void loadSessions().catch(() => undefined);
           return;
         }
+        if (event.type === "run.cancelled") {
+          clearActiveRun();
+          setChatError("Response cancelled.");
+          void loadMessages(event.sessionId);
+          return;
+        }
 
-        setRunning(false);
+        clearActiveRun();
         setChatError(event.error.message);
         void loadMessages(event.sessionId);
       };
@@ -237,8 +278,12 @@ export function App() {
       };
       socket.onclose = () => {
         if (disposed) return;
+        const interrupted = activeRunRef.current !== null;
         setSocketState("disconnected");
-        setRunning(false);
+        clearActiveRun();
+        if (interrupted) {
+          setChatError("Connection lost while the response was streaming.");
+        }
         reconnectTimer = window.setTimeout(connect, 1_000);
       };
     };
@@ -344,9 +389,38 @@ export function App() {
       text,
     });
     socket.send(JSON.stringify(request));
+    const pendingRun: ActiveRun = {
+      requestId: request.requestId,
+      runId: null,
+      sessionId: request.sessionId,
+    };
+    activeRunRef.current = pendingRun;
+    setActiveRun(pendingRun);
+    setStreamedText("");
     setComposerText("");
     setChatError(null);
-    setRunning(true);
+  };
+
+  const cancelRun = () => {
+    const socket = socketRef.current;
+    const current = activeRunRef.current;
+    if (
+      !current?.runId ||
+      !socket ||
+      socket.readyState !== WebSocket.OPEN
+    ) {
+      return;
+    }
+    socket.send(
+      JSON.stringify(
+        ChatCancelEventSchema.parse({
+          type: "run.cancel",
+          requestId: current.requestId,
+          runId: current.runId,
+          sessionId: current.sessionId,
+        }),
+      ),
+    );
   };
 
   const selectedSession =
@@ -356,7 +430,7 @@ export function App() {
     <main className="app-shell">
       <aside className="sidebar" aria-label="Conversations">
         <header className="brand">
-          <p className="eyebrow">Milestone 2</p>
+          <p className="eyebrow">Milestone 3</p>
           <h1 id="app-title">SynthiaClaw</h1>
           <p>Persistent local chat</p>
         </header>
@@ -447,6 +521,7 @@ export function App() {
           className="new-session"
           type="button"
           aria-label="Create new conversation"
+          disabled={running}
           onClick={() => void createSession()}
         >
           <span aria-hidden="true">＋</span> New conversation
@@ -461,6 +536,7 @@ export function App() {
                 type="button"
                 key={session.id}
                 aria-label={session.title}
+                disabled={running}
                 className={
                   session.id === selectedSessionId ? "session is-selected" : "session"
                 }
@@ -498,7 +574,9 @@ export function App() {
                   Conversation history could not be loaded.
                 </p>
               ) : null}
-              {historyState === "ready" && messages.length === 0 ? (
+              {historyState === "ready" &&
+              messages.length === 0 &&
+              !running ? (
                 <p className="empty-chat">No messages yet.</p>
               ) : null}
               {messages.map((message) => (
@@ -512,7 +590,16 @@ export function App() {
                   <p>{message.payload.text}</p>
                 </article>
               ))}
-              {running ? (
+              {streamedText ? (
+                <article
+                  className="message message--assistant message--streaming"
+                  aria-busy="true"
+                >
+                  <p className="message__role">Synthia</p>
+                  <p>{streamedText}</p>
+                </article>
+              ) : null}
+              {running && !streamedText ? (
                 <div className="thinking" role="status">
                   <span aria-hidden="true" />
                   Thinking…
@@ -534,19 +621,32 @@ export function App() {
                   value={composerText}
                   onChange={(event) => setComposerText(event.target.value)}
                 />
-                <button
-                  type="submit"
-                  aria-label="Send message"
-                  disabled={
-                    running ||
-                    socketState !== "connected" ||
-                    (providerStatus?.mode === "codex-subscription" &&
-                      !providerStatus.ready) ||
-                    composerText.trim().length === 0
-                  }
-                >
-                  Send
-                </button>
+                {running ? (
+                  <button
+                    className="composer__stop"
+                    type="button"
+                    aria-label="Stop generating"
+                    disabled={
+                      !activeRun?.runId || socketState !== "connected"
+                    }
+                    onClick={cancelRun}
+                  >
+                    Stop
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    aria-label="Send message"
+                    disabled={
+                      socketState !== "connected" ||
+                      (providerStatus?.mode === "codex-subscription" &&
+                        !providerStatus.ready) ||
+                      composerText.trim().length === 0
+                    }
+                  >
+                    Send
+                  </button>
+                )}
               </form>
             </footer>
           </>

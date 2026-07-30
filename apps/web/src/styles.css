@@ -338,6 +338,10 @@ button:disabled {
   color: #91e7dc;
 }
 
+.message--streaming {
+  border-color: #376064;
+}
+
 .empty-chat,
 .welcome-state {
   margin: auto;
@@ -405,6 +409,15 @@ button:disabled {
 
 .composer button:hover:not(:disabled) {
   background: #267268;
+}
+
+.composer .composer__stop {
+  border-color: #a54b53;
+  background: #713039;
+}
+
+.composer .composer__stop:hover:not(:disabled) {
+  background: #8a3a44;
 }
 
 .chat-error {

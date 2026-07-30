@@ -202,7 +202,7 @@ describe("SynthiaClaw chat workspace", () => {
     );
   });
 
-  it("sends chat over WebSocket and reloads authoritative history", async () => {
+  it("renders streamed deltas before reloading authoritative history", async () => {
     let history: unknown[] = [];
     fetchMock.mockImplementation(async (input) => {
       const url = input.toString();
@@ -254,6 +254,27 @@ describe("SynthiaClaw chat workspace", () => {
     expect(await screen.findByText("Persisted hello")).toBeInTheDocument();
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
 
+    act(() =>
+      socket?.serverMessage({
+        type: "assistant.delta",
+        requestId: sent.requestId,
+        runId: "run_browser_1",
+        sessionId: session.id,
+        delta: "Persisted ",
+      }),
+    );
+    expect(await screen.findByText("Persisted")).toBeInTheDocument();
+    act(() =>
+      socket?.serverMessage({
+        type: "assistant.delta",
+        requestId: sent.requestId,
+        runId: "run_browser_1",
+        sessionId: session.id,
+        delta: "response",
+      }),
+    );
+    expect(await screen.findByText("Persisted response")).toBeInTheDocument();
+
     history = [userMessage, assistantMessage];
     act(() =>
       socket?.serverMessage({
@@ -268,6 +289,142 @@ describe("SynthiaClaw chat workspace", () => {
     await waitFor(() =>
       expect(screen.queryByText("Thinking…")).not.toBeInTheDocument(),
     );
+  });
+
+  it("sends run cancellation and clears the transient assistant response", async () => {
+    let history: unknown[] = [];
+    fetchMock.mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url === "/api/health") return healthResponse();
+      if (url === "/api/sessions") return jsonResponse({ sessions: [session] });
+      if (url === `/api/sessions/${session.id}/messages`) {
+        return jsonResponse({ messages: history });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const user = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: session.title });
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket?.open());
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "Stop this",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    const request = JSON.parse(socket?.sent[0] ?? "{}") as {
+      requestId: string;
+    };
+    history = [
+      {
+        ...userMessage,
+        payload: { text: "Stop this" },
+      },
+    ];
+    act(() =>
+      socket?.serverMessage({
+        type: "run.started",
+        requestId: request.requestId,
+        runId: "run_cancel_browser_1",
+        sessionId: session.id,
+      }),
+    );
+    act(() =>
+      socket?.serverMessage({
+        type: "assistant.delta",
+        requestId: request.requestId,
+        runId: "run_cancel_browser_1",
+        sessionId: session.id,
+        delta: "Transient answer",
+      }),
+    );
+    expect(await screen.findByText("Transient answer")).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Stop generating" }),
+    );
+    expect(JSON.parse(socket?.sent[1] ?? "{}")).toEqual({
+      type: "run.cancel",
+      requestId: request.requestId,
+      runId: "run_cancel_browser_1",
+      sessionId: session.id,
+    });
+    act(() =>
+      socket?.serverMessage({
+        type: "run.cancelled",
+        requestId: request.requestId,
+        runId: "run_cancel_browser_1",
+        sessionId: session.id,
+      }),
+    );
+
+    expect(await screen.findByText("Response cancelled.")).toBeInTheDocument();
+    expect(screen.queryByText("Transient answer")).not.toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "Try again",
+    );
+    expect(
+      screen.getByRole("button", { name: "Send message" }),
+    ).not.toBeDisabled();
+  });
+
+  it("clears a transient response and reports an interrupted disconnect", async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url === "/api/health") return healthResponse();
+      if (url === "/api/sessions") return jsonResponse({ sessions: [session] });
+      if (url === `/api/sessions/${session.id}/messages`) {
+        return jsonResponse({ messages: [] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const user = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: session.title });
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket?.open());
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "Disconnect",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    const request = JSON.parse(socket?.sent[0] ?? "{}") as {
+      requestId: string;
+    };
+    act(() =>
+      socket?.serverMessage({
+        type: "run.started",
+        requestId: request.requestId,
+        runId: "run_disconnect_browser_1",
+        sessionId: session.id,
+      }),
+    );
+    act(() =>
+      socket?.serverMessage({
+        type: "assistant.delta",
+        requestId: request.requestId,
+        runId: "run_disconnect_browser_1",
+        sessionId: session.id,
+        delta: "Unfinished answer",
+      }),
+    );
+    expect(await screen.findByText("Unfinished answer")).toBeInTheDocument();
+
+    act(() => socket?.close());
+
+    expect(
+      await screen.findByText(
+        "Connection lost while the response was streaming.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Unfinished answer")).not.toBeInTheDocument();
   });
 
   it("shows failed and disconnected states without leaving the run locked", async () => {
