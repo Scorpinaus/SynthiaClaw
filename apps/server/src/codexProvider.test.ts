@@ -6,6 +6,7 @@ import {
   type CodexTransport,
   type JsonRpcMessage,
 } from "./codexProvider.js";
+import type { ProviderStreamChunk } from "./provider.js";
 
 class FakeCodexTransport implements CodexTransport {
   readonly sent: JsonRpcMessage[] = [];
@@ -61,8 +62,10 @@ function respondToInitialization(
   return message.method === "initialized";
 }
 
-async function collect(stream: AsyncIterable<string>): Promise<string[]> {
-  const chunks: string[] = [];
+async function collect(
+  stream: AsyncIterable<ProviderStreamChunk>,
+): Promise<ProviderStreamChunk[]> {
+  const chunks: ProviderStreamChunk[] = [];
   for await (const chunk of stream) chunks.push(chunk);
   return chunks;
 }
@@ -281,6 +284,129 @@ describe("CodexSubscriptionProvider", () => {
       params: {
         threadId: "thr_synthia_1",
         input: [{ type: "text", text: "Current question" }],
+      },
+    });
+  });
+
+  it("executes experimental dynamic tools through the server registry", async () => {
+    const executeTool = vi
+      .fn()
+      .mockResolvedValue('{"iso":"2026-07-30T12:34:56.000Z"}');
+    const transport = new FakeCodexTransport((message, fake) => {
+      if (respondToInitialization(message, fake)) return;
+      if (message.method === "account/read" && "id" in message) {
+        fake.emit({
+          id: message.id,
+          result: {
+            account: {
+              type: "chatgpt",
+              email: "person@example.com",
+              planType: "plus",
+            },
+            requiresOpenaiAuth: true,
+          },
+        });
+      } else if (message.method === "thread/start" && "id" in message) {
+        fake.emit({
+          id: message.id,
+          result: { thread: { id: "thr_tools_1" } },
+        });
+      } else if (message.method === "turn/start" && "id" in message) {
+        fake.emit({
+          id: message.id,
+          result: {
+            turn: { id: "turn_tools_1", status: "inProgress", items: [] },
+          },
+        });
+        fake.emit({
+          id: "server_call_1",
+          method: "item/tool/call",
+          params: {
+            threadId: "thr_tools_1",
+            turnId: "turn_tools_1",
+            callId: "call_time_1",
+            namespace: null,
+            tool: "current_time",
+            arguments: {},
+          },
+        });
+      } else if (message.id === "server_call_1" && "result" in message) {
+        fake.emit({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thr_tools_1",
+            turnId: "turn_tools_1",
+            itemId: "item_answer_tools_1",
+            delta: "It is 12:34 UTC.",
+          },
+        });
+        fake.emit({
+          method: "turn/completed",
+          params: {
+            threadId: "thr_tools_1",
+            turn: { id: "turn_tools_1", status: "completed", items: [] },
+          },
+        });
+      }
+    });
+    const provider = new CodexSubscriptionProvider(
+      new CodexAppServerClient(transport),
+      { cwd: "D:\\Project\\SynthiaClaw" },
+    );
+    const tools = [
+      {
+        name: "current_time",
+        description: "Return the server time.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
+          additionalProperties: false as const,
+        },
+      },
+    ];
+
+    await expect(
+      collect(
+        provider.stream(
+          [{ role: "user", content: "What time is it?" }],
+          new AbortController().signal,
+          tools,
+          executeTool,
+        ),
+      ),
+    ).resolves.toEqual([
+      {
+        type: "tool_call",
+        callId: "call_time_1",
+        toolName: "current_time",
+        arguments: {},
+        providerManaged: true,
+      },
+      {
+        type: "tool_result",
+        callId: "call_time_1",
+        toolName: "current_time",
+        output: '{"iso":"2026-07-30T12:34:56.000Z"}',
+        isError: false,
+      },
+      "It is 12:34 UTC.",
+    ]);
+    expect(executeTool).toHaveBeenCalledWith("current_time", {});
+    expect(transport.sent).toContainEqual({
+      method: "thread/start",
+      id: expect.any(Number),
+      params: expect.objectContaining({ dynamicTools: tools }),
+    });
+    expect(transport.sent).toContainEqual({
+      id: "server_call_1",
+      result: {
+        contentItems: [
+          {
+            type: "inputText",
+            text: '{"iso":"2026-07-30T12:34:56.000Z"}',
+          },
+        ],
+        success: true,
       },
     });
   });

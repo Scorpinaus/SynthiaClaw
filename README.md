@@ -38,12 +38,14 @@ defaults to the backend process directory. `CODEX_MODEL` is optional; when it
 is omitted, Codex chooses its configured default model.
 
 Each completion uses an ephemeral, read-only Codex thread with approvals
-disabled. Previously persisted SynthiaClaw messages are injected as
-conversation context. Assistant text streams to the UI while the turn runs,
-but only the final assistant response is persisted. Cancelled and disconnected
-runs discard partial assistant text. Subscription mode requires a
-ChatGPT-authenticated Codex account; an API-key Codex login is deliberately
-rejected to prevent accidental API billing.
+disabled. The four SynthiaClaw server tools are exposed through Codex dynamic
+tools; Codex itself does not receive unrestricted filesystem access. Previously
+persisted messages are injected as conversation context. Assistant text and
+tool activity stream to the UI while the turn runs, but only the final
+assistant response is persisted. Cancelled and disconnected runs discard
+partial assistant text. Subscription mode requires a ChatGPT-authenticated
+Codex account; an API-key Codex login is deliberately rejected to prevent
+accidental API billing.
 
 ### OpenAI-compatible API
 
@@ -64,6 +66,18 @@ into the backend process as shown or use your preferred environment loader.
 The backend binds to `127.0.0.1:3001`, the frontend binds to
 `127.0.0.1:5173`, and SQLite data is stored at `data/synthia.sqlite` by
 default. Override these with `HOST`, `PORT`, and `DATABASE_PATH`.
+
+## Agent tools and limits
+
+The server registry exposes `current_time`, `list_files`, `read_file`, and
+`write_file`. Every tool argument object is validated on the backend.
+Filesystem paths must be relative and stay inside `TOOL_WORKSPACE_ROOT`, which
+defaults to `CODEX_WORKING_DIRECTORY` and then the backend process directory.
+
+Agent runs default to at most 8 model iterations and 30 seconds. Override these
+with positive integer values in `AGENT_MAX_ITERATIONS` and
+`AGENT_TIMEOUT_MS`. Tool calls and results are sent to the browser as they
+occur so they remain visible between the user request and final response.
 
 Open `http://127.0.0.1:5173`, create a conversation, and send a message.
 Sessions and messages remain available after refreshing the page or restarting
@@ -96,8 +110,8 @@ remain backend-only.
 The WebSocket protocol uses request and run IDs for correlation:
 
 - Client events: `chat.send`, `run.cancel`
-- Server lifecycle events: `run.started`, `assistant.delta`,
-  `assistant.completed`, `run.cancelled`, `run.failed`
+- Server lifecycle events: `run.started`, `assistant.delta`, `tool.call`,
+  `tool.result`, `assistant.completed`, `run.cancelled`, `run.failed`
 
 The backend aborts the upstream provider when a run is cancelled or its socket
 disconnects. Request IDs are idempotency keys: retrying a completed request

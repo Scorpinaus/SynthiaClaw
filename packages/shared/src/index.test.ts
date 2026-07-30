@@ -15,6 +15,8 @@ import {
   RunCancelledEventSchema,
   RunStartedEventSchema,
   SessionSchema,
+  ToolCallEventSchema,
+  ToolResultEventSchema,
 } from "./index.js";
 
 describe("HealthResponseSchema", () => {
@@ -232,5 +234,38 @@ describe("WebSocket contracts", () => {
         delta: "",
       }).success,
     ).toBe(false);
+  });
+
+  it("validates visible tool calls and their server results", () => {
+    const call = ToolCallEventSchema.parse({
+      type: "tool.call",
+      requestId: "req_browser_1",
+      runId: "run_server_1",
+      sessionId,
+      callId: "call_time_1",
+      toolName: "current_time",
+      arguments: {},
+    });
+
+    expect(call).toMatchObject({
+      type: "tool.call",
+      toolName: "current_time",
+    });
+    expect(
+      ToolResultEventSchema.parse({
+        type: "tool.result",
+        requestId: call.requestId,
+        runId: call.runId,
+        sessionId,
+        callId: call.callId,
+        toolName: call.toolName,
+        output: '{"iso":"2026-07-30T12:00:00.000Z"}',
+        isError: false,
+      }),
+    ).toMatchObject({
+      type: "tool.result",
+      callId: "call_time_1",
+      isError: false,
+    });
   });
 });

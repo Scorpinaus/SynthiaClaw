@@ -19,10 +19,13 @@ import {
   SessionListResponseSchema,
   SessionParamsSchema,
   SessionResponseSchema,
+  ToolCallEventSchema,
+  ToolResultEventSchema,
   type ServerWebSocketEvent,
 } from "@synthia/shared";
 import Fastify, { type FastifyServerOptions } from "fastify";
 
+import { runAgentLoop } from "./agentLoop.js";
 import {
   ProviderError,
   type ModelProvider,
@@ -30,12 +33,19 @@ import {
 } from "./provider.js";
 import { createProviderRuntimeFromEnv } from "./providerRuntime.js";
 import { ChatRepository, RepositoryError } from "./repository.js";
+import { createToolRegistry } from "./tools.js";
 
 export interface AppDependencies {
   databasePath?: string;
   provider?: ModelProvider;
   providerRuntime?: ProviderRuntime;
   repository?: ChatRepository;
+  agent?: {
+    workspaceRoot: string;
+    maxIterations: number;
+    timeoutMs: number;
+    now?: () => Date;
+  };
 }
 
 export function buildApp(
@@ -81,6 +91,23 @@ export function buildApp(
   }
   const provider = runtime.provider;
   const providerConfigurationError = runtime.configurationError ?? null;
+  const agent = {
+    workspaceRoot:
+      dependencies.agent?.workspaceRoot ??
+      process.env.TOOL_WORKSPACE_ROOT ??
+      process.env.CODEX_WORKING_DIRECTORY ??
+      process.cwd(),
+    maxIterations:
+      dependencies.agent?.maxIterations ??
+      readPositiveInteger(process.env.AGENT_MAX_ITERATIONS, 8),
+    timeoutMs:
+      dependencies.agent?.timeoutMs ??
+      readPositiveInteger(process.env.AGENT_TIMEOUT_MS, 30_000),
+  };
+  const toolRegistry = createToolRegistry({
+    workspaceRoot: agent.workspaceRoot,
+    now: dependencies.agent?.now,
+  });
 
   const errorBody = (code: string, message: string) =>
     ErrorResponseSchema.parse({ error: { code, message } });
@@ -261,6 +288,8 @@ export function buildApp(
         controller: AbortController;
         cancelled: boolean;
         cancelNotified: boolean;
+        timedOut: boolean;
+        timeout: NodeJS.Timeout | null;
       };
       const activeRuns = new Map<string, ActiveRun>();
 
@@ -278,6 +307,7 @@ export function buildApp(
         if (active.cancelled) return;
         active.cancelled = true;
         activeRuns.delete(active.runId);
+        if (active.timeout) clearTimeout(active.timeout);
         repository.cancelRun(active.requestId);
         active.controller.abort();
         if (notify) {
@@ -432,14 +462,22 @@ export function buildApp(
           return;
         }
 
+        const controller = new AbortController();
         const active: ActiveRun = {
           requestId: event.requestId,
           runId: start.runId,
           sessionId: event.sessionId,
-          controller: new AbortController(),
+          controller,
           cancelled: false,
           cancelNotified: false,
+          timedOut: false,
+          timeout: null,
         };
+        active.timeout = setTimeout(() => {
+          active.timedOut = true;
+          controller.abort();
+        }, agent.timeoutMs);
+        active.timeout.unref();
         activeRuns.set(active.runId, active);
         if (
           !send(
@@ -466,28 +504,20 @@ export function buildApp(
             );
           }
 
-          let responseText = "";
           const messages = repository
             .listMessages(event.sessionId)
             .map((message) => ({
               role: message.role,
               content: message.payload.text,
             }));
-          for await (const delta of provider.stream(
+          const responseText = await runAgentLoop({
+            provider,
             messages,
-            active.controller.signal,
-          )) {
-            if (active.cancelled || active.controller.signal.aborted) return;
-            if (!delta) continue;
-            responseText += delta;
-            if (responseText.length > 100_000) {
-              throw new ProviderError(
-                "PROVIDER_INVALID_RESPONSE",
-                "The model provider response exceeded the message limit.",
-              );
-            }
-            if (
-              !send(
+            tools: toolRegistry,
+            signal: active.controller.signal,
+            maxIterations: agent.maxIterations,
+            onDelta: (delta) => {
+              send(
                 AssistantDeltaEventSchema.parse({
                   type: "assistant.delta",
                   requestId: event.requestId,
@@ -495,25 +525,50 @@ export function buildApp(
                   sessionId: event.sessionId,
                   delta,
                 }),
-              )
-            ) {
-              cancelActiveRun(active, false);
-              return;
-            }
-          }
-          if (active.cancelled || active.controller.signal.aborted) return;
-          if (!responseText) {
+              );
+            },
+            onToolCall: (call) => {
+              send(
+                ToolCallEventSchema.parse({
+                  type: "tool.call",
+                  requestId: event.requestId,
+                  runId: start.runId,
+                  sessionId: event.sessionId,
+                  callId: call.callId,
+                  toolName: call.toolName,
+                  arguments: call.arguments,
+                }),
+              );
+            },
+            onToolResult: (call, output, isError) => {
+              send(
+                ToolResultEventSchema.parse({
+                  type: "tool.result",
+                  requestId: event.requestId,
+                  runId: start.runId,
+                  sessionId: event.sessionId,
+                  callId: call.callId,
+                  toolName: call.toolName,
+                  output,
+                  isError,
+                }),
+              );
+            },
+          });
+          if (active.timedOut) {
             throw new ProviderError(
-              "PROVIDER_INVALID_RESPONSE",
-              "The model provider returned no assistant text.",
+              "AGENT_TIMEOUT",
+              `The agent run exceeded its ${agent.timeoutMs} ms timeout.`,
             );
           }
+          if (active.cancelled || active.controller.signal.aborted) return;
 
           const message = repository.completeRun(
             event.requestId,
             responseText,
           );
           activeRuns.delete(active.runId);
+          if (active.timeout) clearTimeout(active.timeout);
           send(
             AssistantCompletedEventSchema.parse({
               type: "assistant.completed",
@@ -525,7 +580,11 @@ export function buildApp(
           );
         } catch (error) {
           activeRuns.delete(active.runId);
-          if (active.cancelled || active.controller.signal.aborted) {
+          if (active.timeout) clearTimeout(active.timeout);
+          if (
+            !active.timedOut &&
+            (active.cancelled || active.controller.signal.aborted)
+          ) {
             repository.cancelRun(event.requestId);
             if (!active.cancelNotified) {
               active.cancelNotified = true;
@@ -542,7 +601,12 @@ export function buildApp(
           }
 
           const detail =
-            error instanceof ProviderError
+            active.timedOut
+              ? {
+                  code: "AGENT_TIMEOUT",
+                  message: `The agent run exceeded its ${agent.timeoutMs} ms timeout.`,
+                }
+              : error instanceof ProviderError
               ? { code: error.code, message: error.message }
               : {
                   code: "PROVIDER_FAILED",
@@ -589,4 +653,13 @@ function getFailureIdentifiers(input: unknown): {
       ? sessionIdResult.data.id
       : randomUUID(),
   };
+}
+
+function readPositiveInteger(
+  rawValue: string | undefined,
+  fallback: number,
+): number {
+  if (rawValue === undefined) return fallback;
+  const parsed = Number(rawValue);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }

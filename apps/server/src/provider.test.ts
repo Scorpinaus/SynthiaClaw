@@ -6,11 +6,14 @@ import {
   OpenAICompatibleProvider,
   ProviderError,
   createOpenAIProviderFromEnv,
+  type ProviderStreamChunk,
 } from "./provider.js";
 import { createProviderRuntimeFromEnv } from "./providerRuntime.js";
 
-async function collect(stream: AsyncIterable<string>): Promise<string[]> {
-  const chunks: string[] = [];
+async function collect(
+  stream: AsyncIterable<ProviderStreamChunk>,
+): Promise<ProviderStreamChunk[]> {
+  const chunks: ProviderStreamChunk[] = [];
   for await (const chunk of stream) chunks.push(chunk);
   return chunks;
 }
@@ -123,6 +126,87 @@ describe("OpenAICompatibleProvider", () => {
     });
     controller.abort();
     await expect(iterator.next()).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("assembles streamed tool calls and sends server tool definitions", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_time_1","type":"function","function":{"name":"current_time","arguments":"{"}}]}}]}\n\n',
+              ),
+            );
+            controller.enqueue(
+              encoder.encode(
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n',
+              ),
+            );
+            controller.close();
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" }, status: 200 },
+      ),
+    );
+    const provider = new OpenAICompatibleProvider(
+      {
+        apiKey: "server-secret",
+        baseUrl: "https://models.example.test/v1",
+        model: "example-model",
+      },
+      fetchMock,
+    );
+    const tools = [
+      {
+        name: "current_time",
+        description: "Return the current server time.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    ];
+
+    await expect(
+      collect(
+        provider.stream(
+          [{ role: "user", content: "What time is it?" }],
+          new AbortController().signal,
+          tools,
+        ),
+      ),
+    ).resolves.toEqual([
+      {
+        type: "tool_call",
+        callId: "call_time_1",
+        toolName: "current_time",
+        arguments: {},
+      },
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://models.example.test/v1/chat/completions",
+      expect.objectContaining({
+        body: JSON.stringify({
+          model: "example-model",
+          messages: [{ role: "user", content: "What time is it?" }],
+          stream: true,
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "current_time",
+                description: "Return the current server time.",
+                parameters: tools[0]?.inputSchema,
+              },
+            },
+          ],
+        }),
+      }),
+    );
   });
 
   it("reports missing server configuration without exposing credentials", () => {

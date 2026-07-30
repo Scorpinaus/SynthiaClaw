@@ -342,6 +342,47 @@ button:disabled {
   border-color: #376064;
 }
 
+.tool-activity {
+  width: min(42rem, 88%);
+  padding: 0.8rem 0.9rem;
+  border: 1px solid #405b61;
+  border-radius: 0.75rem;
+  background: #0b191d;
+}
+
+.tool-activity--error {
+  border-color: #744248;
+}
+
+.tool-activity__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.tool-activity__header strong {
+  color: #86e7dc;
+  font-size: 0.78rem;
+}
+
+.tool-activity__header span {
+  color: #81999d;
+  font-size: 0.7rem;
+}
+
+.tool-activity pre {
+  overflow-x: auto;
+  margin: 0.6rem 0 0;
+  padding: 0.55rem;
+  border-radius: 0.45rem;
+  color: #aabec1;
+  background: #071114;
+  font: 0.72rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .empty-chat,
 .welcome-state {
   margin: auto;

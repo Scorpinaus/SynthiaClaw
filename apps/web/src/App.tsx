@@ -29,6 +29,13 @@ type ActiveRun = {
   runId: string | null;
   sessionId: string;
 };
+type ToolActivity = {
+  callId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  output: string | null;
+  isError: boolean;
+};
 
 const connectionCopy: Record<ConnectionState, string> = {
   checking: "Checking backend...",
@@ -57,6 +64,7 @@ export function App() {
   const [composerText, setComposerText] = useState("");
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   const [streamedText, setStreamedText] = useState("");
+  const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
   const [chatError, setChatError] = useState<string | null>(null);
   const [providerStatus, setProviderStatus] =
     useState<ProviderStatusResponse | null>(null);
@@ -179,6 +187,7 @@ export function App() {
     setMessages([]);
     setChatError(null);
     setStreamedText("");
+    setToolActivities([]);
     if (selectedSessionId) {
       void loadMessages(selectedSessionId);
     } else {
@@ -251,6 +260,35 @@ export function App() {
         }
         if (event.type === "assistant.delta") {
           setStreamedText((text) => `${text}${event.delta}`);
+          return;
+        }
+        if (event.type === "tool.call") {
+          setToolActivities((activities) => [
+            ...activities.filter(
+              (activity) => activity.callId !== event.callId,
+            ),
+            {
+              callId: event.callId,
+              toolName: event.toolName,
+              arguments: event.arguments,
+              output: null,
+              isError: false,
+            },
+          ]);
+          return;
+        }
+        if (event.type === "tool.result") {
+          setToolActivities((activities) =>
+            activities.map((activity) =>
+              activity.callId === event.callId
+                ? {
+                    ...activity,
+                    output: event.output,
+                    isError: event.isError,
+                  }
+                : activity,
+            ),
+          );
           return;
         }
         if (event.type === "assistant.completed") {
@@ -397,6 +435,7 @@ export function App() {
     activeRunRef.current = pendingRun;
     setActiveRun(pendingRun);
     setStreamedText("");
+    setToolActivities([]);
     setComposerText("");
     setChatError(null);
   };
@@ -430,7 +469,7 @@ export function App() {
     <main className="app-shell">
       <aside className="sidebar" aria-label="Conversations">
         <header className="brand">
-          <p className="eyebrow">Milestone 3</p>
+          <p className="eyebrow">Milestone 4</p>
           <h1 id="app-title">SynthiaClaw</h1>
           <p>Persistent local chat</p>
         </header>
@@ -588,6 +627,29 @@ export function App() {
                     {message.role === "user" ? "You" : "Synthia"}
                   </p>
                   <p>{message.payload.text}</p>
+                </article>
+              ))}
+              {toolActivities.map((activity) => (
+                <article
+                  className={`tool-activity ${
+                    activity.isError ? "tool-activity--error" : ""
+                  }`}
+                  key={activity.callId}
+                >
+                  <div className="tool-activity__header">
+                    <strong>Calling {activity.toolName}</strong>
+                    <span>
+                      {activity.output === null
+                        ? "Running"
+                        : activity.isError
+                          ? "Tool failed"
+                          : "Tool completed"}
+                    </span>
+                  </div>
+                  <pre>{JSON.stringify(activity.arguments, null, 2)}</pre>
+                  {activity.output !== null ? (
+                    <pre>{activity.output}</pre>
+                  ) : null}
                 </article>
               ))}
               {streamedText ? (

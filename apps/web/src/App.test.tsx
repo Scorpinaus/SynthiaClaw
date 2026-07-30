@@ -291,6 +291,91 @@ describe("SynthiaClaw chat workspace", () => {
     );
   });
 
+  it("displays tool calls and results between the user message and final response", async () => {
+    let history: unknown[] = [];
+    fetchMock.mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url === "/api/health") return healthResponse();
+      if (url === "/api/sessions") return jsonResponse({ sessions: [session] });
+      if (url === `/api/sessions/${session.id}/messages`) {
+        return jsonResponse({ messages: history });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const user = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: session.title });
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket?.open());
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "What time is it?",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    const request = JSON.parse(socket?.sent[0] ?? "{}") as {
+      requestId: string;
+    };
+    const runId = "run_tools_browser_1";
+    history = [
+      {
+        ...userMessage,
+        payload: { text: "What time is it?" },
+      },
+    ];
+
+    act(() =>
+      socket?.serverMessage({
+        type: "run.started",
+        requestId: request.requestId,
+        runId,
+        sessionId: session.id,
+      }),
+    );
+    act(() =>
+      socket?.serverMessage({
+        type: "tool.call",
+        requestId: request.requestId,
+        runId,
+        sessionId: session.id,
+        callId: "call_time_1",
+        toolName: "current_time",
+        arguments: {},
+      }),
+    );
+    expect(await screen.findByText("Calling current_time")).toBeInTheDocument();
+
+    act(() =>
+      socket?.serverMessage({
+        type: "tool.result",
+        requestId: request.requestId,
+        runId,
+        sessionId: session.id,
+        callId: "call_time_1",
+        toolName: "current_time",
+        output: '{"iso":"2026-07-30T12:34:56.000Z"}',
+        isError: false,
+      }),
+    );
+    expect(await screen.findByText("Tool completed")).toBeInTheDocument();
+    expect(
+      screen.getByText('{"iso":"2026-07-30T12:34:56.000Z"}'),
+    ).toBeInTheDocument();
+
+    act(() =>
+      socket?.serverMessage({
+        type: "assistant.delta",
+        requestId: request.requestId,
+        runId,
+        sessionId: session.id,
+        delta: "It is 12:34 UTC.",
+      }),
+    );
+    expect(await screen.findByText("It is 12:34 UTC.")).toBeInTheDocument();
+  });
+
   it("sends run cancellation and clears the transient assistant response", async () => {
     let history: unknown[] = [];
     fetchMock.mockImplementation(async (input) => {

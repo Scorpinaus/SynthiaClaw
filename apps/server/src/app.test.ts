@@ -162,6 +162,227 @@ describe("model provider REST API", () => {
 });
 
 describe("WebSocket chat API", () => {
+  it("runs a server tool loop and emits the call and result before the final response", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "synthia-agent-loop-"));
+    const agentStream = vi.fn<ModelProvider["stream"]>(
+      async function* (messages, _signal, tools) {
+        expect(tools?.map((tool) => tool.name)).toEqual([
+          "current_time",
+          "list_files",
+          "read_file",
+          "write_file",
+        ]);
+        const latest = messages.at(-1);
+        if (latest?.role === "tool") {
+          yield `The server time is ${JSON.parse(latest.content).iso}.`;
+          return;
+        }
+        yield {
+          type: "tool_call",
+          callId: "call_time_1",
+          toolName: "current_time",
+          arguments: {},
+        };
+      },
+    );
+    const agentApp = buildApp(
+      { logger: false },
+      {
+        databasePath: ":memory:",
+        provider: { stream: agentStream },
+        agent: {
+          workspaceRoot,
+          maxIterations: 4,
+          timeoutMs: 1_000,
+          now: () => new Date("2026-07-30T12:34:56.000Z"),
+        },
+      },
+    );
+
+    try {
+      const createResponse = await agentApp.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { title: "Agent time" },
+      });
+      const session = SessionResponseSchema.parse(createResponse.json()).session;
+      const socket = await agentApp.injectWS("/api/chat");
+      const lifecycle = new Promise<ServerWebSocketEvent[]>(
+        (resolve, reject) => {
+          const events: ServerWebSocketEvent[] = [];
+          socket.once("error", reject);
+          socket.on("message", (data) => {
+            events.push(
+              ServerWebSocketEventSchema.parse(JSON.parse(data.toString())),
+            );
+            if (events.at(-1)?.type === "assistant.completed") resolve(events);
+          });
+        },
+      );
+
+      socket.send(
+        JSON.stringify({
+          type: "chat.send",
+          requestId: "req_tool_loop_1",
+          sessionId: session.id,
+          text: "What time is it?",
+        }),
+      );
+
+      await expect(lifecycle).resolves.toMatchObject([
+        { type: "run.started" },
+        {
+          type: "tool.call",
+          callId: "call_time_1",
+          toolName: "current_time",
+          arguments: {},
+        },
+        {
+          type: "tool.result",
+          callId: "call_time_1",
+          toolName: "current_time",
+          isError: false,
+          output: '{"iso":"2026-07-30T12:34:56.000Z"}',
+        },
+        {
+          type: "assistant.delta",
+          delta: "The server time is 2026-07-30T12:34:56.000Z.",
+        },
+        { type: "assistant.completed" },
+      ]);
+      expect(agentStream).toHaveBeenCalledTimes(2);
+      socket.close();
+    } finally {
+      await agentApp.close();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails runs that exceed the tool iteration limit", async () => {
+    let callNumber = 0;
+    const loopingStream = vi.fn<ModelProvider["stream"]>(async function* () {
+      callNumber += 1;
+      yield {
+        type: "tool_call",
+        callId: `call_loop_${callNumber}`,
+        toolName: "current_time",
+        arguments: {},
+      };
+    });
+    const limitedApp = buildApp(
+      { logger: false },
+      {
+        databasePath: ":memory:",
+        provider: { stream: loopingStream },
+        agent: {
+          workspaceRoot: process.cwd(),
+          maxIterations: 2,
+          timeoutMs: 1_000,
+        },
+      },
+    );
+
+    try {
+      const created = await limitedApp.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { title: "Iteration limit" },
+      });
+      const session = SessionResponseSchema.parse(created.json()).session;
+      const socket = await limitedApp.injectWS("/api/chat");
+      const failure = new Promise<ServerWebSocketEvent>((resolve, reject) => {
+        socket.once("error", reject);
+        socket.on("message", (data) => {
+          const event = ServerWebSocketEventSchema.parse(
+            JSON.parse(data.toString()),
+          );
+          if (event.type === "run.failed") resolve(event);
+        });
+      });
+
+      socket.send(
+        JSON.stringify({
+          type: "chat.send",
+          requestId: "req_iteration_limit_1",
+          sessionId: session.id,
+          text: "Loop forever",
+        }),
+      );
+
+      await expect(failure).resolves.toMatchObject({
+        type: "run.failed",
+        error: { code: "AGENT_ITERATION_LIMIT" },
+      });
+      expect(loopingStream).toHaveBeenCalledTimes(2);
+      socket.close();
+    } finally {
+      await limitedApp.close();
+    }
+  });
+
+  it("aborts and fails runs after the configured timeout", async () => {
+    const timeoutStream = vi.fn<ModelProvider["stream"]>(
+      async function* (_messages, signal) {
+        await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () =>
+              reject(new DOMException("The run timed out.", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    );
+    const timeoutApp = buildApp(
+      { logger: false },
+      {
+        databasePath: ":memory:",
+        provider: { stream: timeoutStream },
+        agent: {
+          workspaceRoot: process.cwd(),
+          maxIterations: 4,
+          timeoutMs: 20,
+        },
+      },
+    );
+
+    try {
+      const created = await timeoutApp.inject({
+        method: "POST",
+        url: "/api/sessions",
+        payload: { title: "Timeout" },
+      });
+      const session = SessionResponseSchema.parse(created.json()).session;
+      const socket = await timeoutApp.injectWS("/api/chat");
+      const failure = new Promise<ServerWebSocketEvent>((resolve, reject) => {
+        socket.once("error", reject);
+        socket.on("message", (data) => {
+          const event = ServerWebSocketEventSchema.parse(
+            JSON.parse(data.toString()),
+          );
+          if (event.type === "run.failed") resolve(event);
+        });
+      });
+
+      socket.send(
+        JSON.stringify({
+          type: "chat.send",
+          requestId: "req_timeout_1",
+          sessionId: session.id,
+          text: "Take too long",
+        }),
+      );
+
+      await expect(failure).resolves.toMatchObject({
+        type: "run.failed",
+        error: { code: "AGENT_TIMEOUT" },
+      });
+      socket.close();
+    } finally {
+      await timeoutApp.close();
+    }
+  });
+
   it("persists one user message and one complete assistant response", async () => {
     const session = await createSession("WebSocket chat");
     const socket = await app.injectWS("/api/chat");
@@ -212,6 +433,11 @@ describe("WebSocket chat API", () => {
     expect(stream).toHaveBeenCalledWith(
       [{ role: "user", content: "Hello over WebSocket" }],
       expect.any(AbortSignal),
+      expect.arrayContaining([
+        expect.objectContaining({ name: "current_time" }),
+        expect.objectContaining({ name: "read_file" }),
+      ]),
+      expect.any(Function),
     );
 
     const history = await app.inject({

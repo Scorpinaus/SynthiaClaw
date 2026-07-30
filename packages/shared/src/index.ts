@@ -22,6 +22,7 @@ const RunIdSchema = z
   .min(5)
   .max(128)
   .regex(/^run_[A-Za-z0-9_-]+$/);
+const ToolCallIdSchema = z.string().min(1).max(128);
 
 export const SessionSchema = z
   .object({
@@ -170,6 +171,31 @@ export const AssistantDeltaEventSchema = z
   })
   .strict();
 
+export const ToolCallEventSchema = z
+  .object({
+    type: z.literal("tool.call"),
+    requestId: RequestIdSchema,
+    runId: RunIdSchema,
+    sessionId: UuidSchema,
+    callId: ToolCallIdSchema,
+    toolName: z.string().min(1).max(128),
+    arguments: z.record(z.unknown()),
+  })
+  .strict();
+
+export const ToolResultEventSchema = z
+  .object({
+    type: z.literal("tool.result"),
+    requestId: RequestIdSchema,
+    runId: RunIdSchema,
+    sessionId: UuidSchema,
+    callId: ToolCallIdSchema,
+    toolName: z.string().min(1).max(128),
+    output: z.string().max(200_000),
+    isError: z.boolean(),
+  })
+  .strict();
+
 export const AssistantCompletedEventSchema = z
   .object({
     type: z.literal("assistant.completed"),
@@ -207,6 +233,8 @@ export const ClientWebSocketEventSchema = z.discriminatedUnion("type", [
 export const ServerWebSocketEventSchema = z.discriminatedUnion("type", [
   RunStartedEventSchema,
   AssistantDeltaEventSchema,
+  ToolCallEventSchema,
+  ToolResultEventSchema,
   AssistantCompletedEventSchema,
   RunCancelledEventSchema,
   RunFailedEventSchema,
@@ -228,6 +256,8 @@ export type ChatSendEvent = z.infer<typeof ChatSendEventSchema>;
 export type ChatCancelEvent = z.infer<typeof ChatCancelEventSchema>;
 export type RunStartedEvent = z.infer<typeof RunStartedEventSchema>;
 export type AssistantDeltaEvent = z.infer<typeof AssistantDeltaEventSchema>;
+export type ToolCallEvent = z.infer<typeof ToolCallEventSchema>;
+export type ToolResultEvent = z.infer<typeof ToolResultEventSchema>;
 export type AssistantCompletedEvent = z.infer<
   typeof AssistantCompletedEventSchema
 >;

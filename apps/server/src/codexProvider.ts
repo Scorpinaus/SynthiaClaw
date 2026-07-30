@@ -13,7 +13,10 @@ import {
   type CodexAccountManager,
   type ModelProvider,
   type ProviderMessage,
+  type ProviderStreamChunk,
+  type ProviderToolExecutor,
 } from "./provider.js";
+import type { ProviderToolDefinition } from "./tools.js";
 
 export interface JsonRpcMessage {
   id?: number | string;
@@ -148,16 +151,16 @@ export class StdioCodexTransport implements CodexTransport {
 type NotificationListener = (message: JsonRpcMessage) => void;
 type ExitListener = (error: Error) => void;
 
-class AsyncTextQueue implements AsyncIterable<string> {
-  private readonly values: string[] = [];
+class AsyncQueue<T> implements AsyncIterable<T> {
+  private readonly values: T[] = [];
   private readonly waiters: Array<{
-    resolve: (result: IteratorResult<string>) => void;
+    resolve: (result: IteratorResult<T>) => void;
     reject: (error: Error) => void;
   }> = [];
   private ended = false;
   private error: Error | null = null;
 
-  push(value: string): void {
+  push(value: T): void {
     if (this.ended || this.error) return;
     const waiter = this.waiters.shift();
     if (waiter) waiter.resolve({ done: false, value });
@@ -178,7 +181,7 @@ class AsyncTextQueue implements AsyncIterable<string> {
     for (const waiter of this.waiters.splice(0)) waiter.reject(error);
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<string> {
+  [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: () => {
         const value = this.values.shift();
@@ -262,15 +265,17 @@ export class CodexAppServerClient implements CodexAccountManager {
   async startThread(options: {
     cwd: string;
     model?: string;
+    tools?: ProviderToolDefinition[];
   }): Promise<string> {
     const result = asRecord(
       await this.request("thread/start", {
         approvalPolicy: "never",
         cwd: options.cwd,
         developerInstructions:
-          "You are the assistant in a persistent chat application. Answer the user's request directly. Do not use tools or modify files.",
+          "You are the assistant in a persistent chat application. Answer the user's request directly. Use only the dynamic tools provided by the host when they are useful.",
         ephemeral: true,
         ...(options.model ? { model: options.model } : {}),
+        ...(options.tools?.length ? { dynamicTools: options.tools } : {}),
         sandbox: "read-only",
       }),
     );
@@ -305,12 +310,13 @@ export class CodexAppServerClient implements CodexAccountManager {
     threadId: string,
     text: string,
     signal: AbortSignal,
-  ): AsyncIterable<string> {
+    executeTool?: ProviderToolExecutor,
+  ): AsyncIterable<ProviderStreamChunk> {
     let turnId: string | null = null;
     let completedTurn: Record<string, unknown> | null = null;
     const finalTextByTurn = new Map<string, string>();
     const pendingDeltas: Array<{ turnId: string; delta: string }> = [];
-    const queue = new AsyncTextQueue();
+    const queue = new AsyncQueue<ProviderStreamChunk>();
     let sawDelta = false;
     let abortRequested = signal.aborted;
     let interruptSent = false;
@@ -359,6 +365,67 @@ export class CodexAppServerClient implements CodexAccountManager {
     };
 
     const unsubscribe = this.subscribe((message) => {
+      if (
+        message.method === "item/tool/call" &&
+        message.id !== undefined &&
+        executeTool
+      ) {
+        const params = asOptionalRecord(message.params);
+        if (
+          params?.threadId === threadId &&
+          typeof params.callId === "string" &&
+          typeof params.tool === "string"
+        ) {
+          const argumentsValue = params.arguments;
+          const displayArguments =
+            typeof argumentsValue === "object" &&
+            argumentsValue !== null &&
+            !Array.isArray(argumentsValue)
+              ? (argumentsValue as Record<string, unknown>)
+              : {};
+          queue.push({
+            type: "tool_call",
+            callId: params.callId,
+            toolName: params.tool,
+            arguments: displayArguments,
+            providerManaged: true,
+          });
+          void (async () => {
+            let output: string;
+            let isError = false;
+            try {
+              output = await executeTool(params.tool as string, argumentsValue);
+            } catch (error) {
+              isError = true;
+              output = JSON.stringify({
+                error: {
+                  code: "TOOL_EXECUTION_FAILED",
+                  message:
+                    error instanceof Error
+                      ? error.message
+                      : "The server tool could not be executed.",
+                },
+              });
+            }
+            queue.push({
+              type: "tool_result",
+              callId: params.callId as string,
+              toolName: params.tool as string,
+              output,
+              isError,
+            });
+            this.transport.send({
+              id: message.id,
+              result: {
+                contentItems: [{ type: "inputText", text: output }],
+                success: !isError,
+              },
+            });
+          })().catch((error: unknown) => {
+            queue.fail(toError(error));
+          });
+        }
+      }
       if (message.method === "item/agentMessage/delta") {
         const params = asOptionalRecord(message.params);
         if (
@@ -513,7 +580,7 @@ export class CodexAppServerClient implements CodexAccountManager {
       return;
     }
 
-    if (message.method && message.id === undefined) {
+    if (message.method) {
       for (const listener of this.listeners) listener(message);
     }
   }
@@ -553,7 +620,9 @@ export class CodexSubscriptionProvider implements ModelProvider {
   async *stream(
     messages: ProviderMessage[],
     signal: AbortSignal = new AbortController().signal,
-  ): AsyncIterable<string> {
+    tools: ProviderToolDefinition[] = [],
+    executeTool?: ProviderToolExecutor,
+  ): AsyncIterable<ProviderStreamChunk> {
     const current = messages.at(-1);
     if (!current || current.role !== "user") {
       throw new ProviderError(
@@ -572,10 +641,18 @@ export class CodexSubscriptionProvider implements ModelProvider {
     }
 
     signal.throwIfAborted();
-    const threadId = await this.client.startThread(this.options);
+    const threadId = await this.client.startThread({
+      ...this.options,
+      tools: executeTool ? tools : [],
+    });
     signal.throwIfAborted();
     await this.client.injectItems(threadId, messages.slice(0, -1));
-    yield* this.client.streamTurn(threadId, current.content, signal);
+    yield* this.client.streamTurn(
+      threadId,
+      current.content,
+      signal,
+      executeTool,
+    );
   }
 }
 
