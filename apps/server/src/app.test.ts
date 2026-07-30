@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -171,6 +171,7 @@ describe("WebSocket chat API", () => {
           "list_files",
           "read_file",
           "write_file",
+          "remember",
         ]);
         const latest = messages.at(-1);
         if (latest?.role === "tool") {
@@ -254,6 +255,143 @@ describe("WebSocket chat API", () => {
       socket.close();
     } finally {
       await agentApp.close();
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("recalls a remembered preference in a new session with bounded identity context", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "synthia-memory-"));
+    writeFileSync(join(workspaceRoot, "AGENT.md"), "Be concise.", "utf8");
+    writeFileSync(join(workspaceRoot, "USER.md"), "The user is Sam.", "utf8");
+    let modelCall = 0;
+    const memoryStream = vi.fn<ModelProvider["stream"]>(
+      async function* (messages, _signal, tools) {
+        modelCall += 1;
+        if (modelCall === 1) {
+          expect(tools?.map((tool) => tool.name)).toContain("remember");
+          expect(messages[0]).toMatchObject({ role: "system" });
+          expect(messages[0]?.content).toContain("## AGENT.md\nBe concise.");
+          expect(messages[0]?.content).toContain(
+            "## USER.md\nThe user is Sam.",
+          );
+          expect(
+            messages.reduce(
+              (total, message) => total + message.content.length,
+              0,
+            ),
+          ).toBeLessThanOrEqual(800);
+          yield {
+            type: "tool_call",
+            callId: "call_remember_dark_mode",
+            toolName: "remember",
+            arguments: { memory: "The user prefers dark mode." },
+          };
+          return;
+        }
+        if (modelCall === 2) {
+          yield "I will remember that preference.";
+          return;
+        }
+
+        expect(messages[0]).toMatchObject({ role: "system" });
+        expect(messages[0]?.content).toContain(
+          "## MEMORY.md\n# Memory\n\n- The user prefers dark mode.",
+        );
+        expect(messages.at(-1)).toEqual({
+          role: "user",
+          content: "What interface theme do I prefer?",
+        });
+        yield "You prefer dark mode.";
+      },
+    );
+    const memoryApp = buildApp(
+      { logger: false },
+      {
+        databasePath: ":memory:",
+        provider: { stream: memoryStream },
+        agent: {
+          workspaceRoot,
+          maxContextChars: 800,
+          maxIterations: 4,
+          timeoutMs: 1_000,
+        },
+      },
+    );
+
+    try {
+      const createSession = async (title: string) => {
+        const response = await memoryApp.inject({
+          method: "POST",
+          url: "/api/sessions",
+          payload: { title },
+        });
+        return SessionResponseSchema.parse(response.json()).session;
+      };
+      const firstSession = await createSession("Remember preference");
+      const secondSession = await createSession("Recall preference");
+      const socket = await memoryApp.injectWS("/api/chat");
+      const receiveCompletedLifecycle = () =>
+        new Promise<ServerWebSocketEvent[]>((resolve, reject) => {
+          const events: ServerWebSocketEvent[] = [];
+          const onMessage = (data: { toString(): string }) => {
+            const event = ServerWebSocketEventSchema.parse(
+              JSON.parse(data.toString()),
+            );
+            events.push(event);
+            if (event.type === "run.failed") {
+              socket.off("message", onMessage);
+              reject(new Error(`${event.error.code}: ${event.error.message}`));
+            } else if (event.type === "assistant.completed") {
+              socket.off("message", onMessage);
+              resolve(events);
+            }
+          };
+          socket.once("error", reject);
+          socket.on("message", onMessage);
+        });
+
+      const remembered = receiveCompletedLifecycle();
+      socket.send(
+        JSON.stringify({
+          type: "chat.send",
+          requestId: "req_remember_preference_1",
+          sessionId: firstSession.id,
+          text: "Remember that I prefer dark mode.",
+        }),
+      );
+      await expect(remembered).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "tool.result",
+            toolName: "remember",
+            isError: false,
+          }),
+        ]),
+      );
+
+      const recalled = receiveCompletedLifecycle();
+      socket.send(
+        JSON.stringify({
+          type: "chat.send",
+          requestId: "req_recall_preference_1",
+          sessionId: secondSession.id,
+          text: "What interface theme do I prefer?",
+        }),
+      );
+      await expect(recalled).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "assistant.completed",
+            message: expect.objectContaining({
+              payload: { text: "You prefer dark mode." },
+            }),
+          }),
+        ]),
+      );
+      expect(memoryStream).toHaveBeenCalledTimes(3);
+      socket.close();
+    } finally {
+      await memoryApp.close();
       rmSync(workspaceRoot, { recursive: true, force: true });
     }
   });
@@ -431,11 +569,15 @@ describe("WebSocket chat API", () => {
       },
     });
     expect(stream).toHaveBeenCalledWith(
-      [{ role: "user", content: "Hello over WebSocket" }],
+      [
+        expect.objectContaining({ role: "system" }),
+        { role: "user", content: "Hello over WebSocket" },
+      ],
       expect.any(AbortSignal),
       expect.arrayContaining([
         expect.objectContaining({ name: "current_time" }),
         expect.objectContaining({ name: "read_file" }),
+        expect.objectContaining({ name: "remember" }),
       ]),
       expect.any(Function),
     );

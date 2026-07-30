@@ -376,6 +376,70 @@ describe("SynthiaClaw chat workspace", () => {
     expect(await screen.findByText("It is 12:34 UTC.")).toBeInTheDocument();
   });
 
+  it("shows an indicator when the remember tool updates memory", async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url === "/api/health") return healthResponse();
+      if (url === "/api/sessions") return jsonResponse({ sessions: [session] });
+      if (url === `/api/sessions/${session.id}/messages`) {
+        return jsonResponse({ messages: [] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const user = userEvent.setup();
+
+    render(<App />);
+    await screen.findByRole("heading", { name: session.title });
+    const socket = FakeWebSocket.instances[0];
+    act(() => socket?.open());
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "Remember that I prefer dark mode.",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    const request = JSON.parse(socket?.sent[0] ?? "{}") as {
+      requestId: string;
+    };
+    const runId = "run_remember_browser_1";
+
+    act(() =>
+      socket?.serverMessage({
+        type: "run.started",
+        requestId: request.requestId,
+        runId,
+        sessionId: session.id,
+      }),
+    );
+    act(() =>
+      socket?.serverMessage({
+        type: "tool.call",
+        requestId: request.requestId,
+        runId,
+        sessionId: session.id,
+        callId: "call_remember_1",
+        toolName: "remember",
+        arguments: { memory: "The user prefers dark mode." },
+      }),
+    );
+    act(() =>
+      socket?.serverMessage({
+        type: "tool.result",
+        requestId: request.requestId,
+        runId,
+        sessionId: session.id,
+        callId: "call_remember_1",
+        toolName: "remember",
+        output:
+          '{"path":"MEMORY.md","memory":"The user prefers dark mode.","updated":true}',
+        isError: false,
+      }),
+    );
+
+    expect(await screen.findByText("Memory updated")).toBeInTheDocument();
+  });
+
   it("sends run cancellation and clears the transient assistant response", async () => {
     let history: unknown[] = [];
     fetchMock.mockImplementation(async (input) => {

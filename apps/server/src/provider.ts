@@ -13,7 +13,7 @@ export interface ProviderToolCall {
 }
 
 export interface ProviderMessage {
-  role: "user" | "assistant" | "tool";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
   toolCallId?: string;
   name?: string;

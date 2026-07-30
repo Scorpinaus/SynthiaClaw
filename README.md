@@ -69,15 +69,24 @@ default. Override these with `HOST`, `PORT`, and `DATABASE_PATH`.
 
 ## Agent tools and limits
 
-The server registry exposes `current_time`, `list_files`, `read_file`, and
-`write_file`. Every tool argument object is validated on the backend.
-Filesystem paths must be relative and stay inside `TOOL_WORKSPACE_ROOT`, which
-defaults to `CODEX_WORKING_DIRECTORY` and then the backend process directory.
+The server registry exposes `current_time`, `list_files`, `read_file`,
+`write_file`, and `remember`. Every tool argument object is validated on the
+backend. Filesystem paths must be relative and stay inside
+`TOOL_WORKSPACE_ROOT`, which defaults to `CODEX_WORKING_DIRECTORY` and then
+the backend process directory.
 
-Agent runs default to at most 8 model iterations and 30 seconds. Override these
-with positive integer values in `AGENT_MAX_ITERATIONS` and
-`AGENT_TIMEOUT_MS`. Tool calls and results are sent to the browser as they
-occur so they remain visible between the user request and final response.
+At the start of every run, SynthiaClaw loads `AGENT.md`, `USER.md`, and
+`MEMORY.md` from that workspace when present. The `remember` tool adds a
+durable fact or preference to `MEMORY.md`; later conversations receive it as
+identity context, and the chat header identifies a successful memory update.
+
+Provider context defaults to 60,000 characters, with identity content capped
+at half of that budget and the newest conversation turns retained first.
+Agent runs also default to at most 8 model iterations and 30 seconds. Override
+these limits with positive integer values in `AGENT_CONTEXT_MAX_CHARS`,
+`AGENT_MAX_ITERATIONS`, and `AGENT_TIMEOUT_MS`. Tool calls and results are
+sent to the browser as they occur so they remain visible between the user
+request and final response.
 
 Open `http://127.0.0.1:5173`, create a conversation, and send a message.
 Sessions and messages remain available after refreshing the page or restarting

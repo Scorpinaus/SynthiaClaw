@@ -60,6 +60,11 @@ const WriteFileArgumentsSchema = z
     content: z.string().max(1_000_000),
   })
   .strict();
+const RememberArgumentsSchema = z
+  .object({
+    memory: z.string().trim().min(1).max(1_000),
+  })
+  .strict();
 
 export function createToolRegistry(
   options: ToolRegistryOptions,
@@ -191,6 +196,55 @@ export function createToolRegistry(
           path: argumentsValue.path,
           bytesWritten: Buffer.byteLength(argumentsValue.content, "utf8"),
         };
+      },
+    },
+    {
+      name: "remember",
+      description:
+        "Persist one durable user preference or fact to MEMORY.md so it is available in future conversations.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          memory: {
+            type: "string",
+            description:
+              "A concise, standalone fact or preference to remember about the user.",
+          },
+        },
+        required: ["memory"],
+        additionalProperties: false,
+      },
+      argumentsSchema: RememberArgumentsSchema,
+      run: async (argumentsValue: { memory: string }) => {
+        const memory = argumentsValue.memory.replace(/\s+/g, " ");
+        const target = resolveWorkspacePath(workspaceRoot, "MEMORY.md");
+        await assertNearestExistingAncestorInside(workspaceRoot, dirname(target));
+        let existing = "";
+        try {
+          await assertRealPathInside(workspaceRoot, target);
+          existing = await readFile(target, "utf8");
+        } catch (error) {
+          if (error instanceof ToolError || !isNotFoundError(error)) throw error;
+        }
+        const bullet = `- ${memory}`;
+        if (
+          existing
+            .split(/\r?\n/)
+            .some((line) => line.trim() === bullet)
+        ) {
+          return { path: "MEMORY.md", memory, updated: false };
+        }
+        const content = existing.trim()
+          ? `${existing.trimEnd()}\n${bullet}\n`
+          : `# Memory\n\n${bullet}\n`;
+        if (Buffer.byteLength(content, "utf8") > 100_000) {
+          throw new ToolError(
+            "MEMORY_LIMIT_REACHED",
+            "MEMORY.md is too large to add another remembered fact.",
+          );
+        }
+        await writeFile(target, content, "utf8");
+        return { path: "MEMORY.md", memory, updated: true };
       },
     },
   ];

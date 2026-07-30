@@ -49,6 +49,20 @@ const socketCopy: Record<SocketState, string> = {
   disconnected: "Chat disconnected",
 };
 
+function reportsMemoryUpdate(output: string): boolean {
+  try {
+    const result = JSON.parse(output) as unknown;
+    return (
+      typeof result === "object" &&
+      result !== null &&
+      "updated" in result &&
+      result.updated === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function App() {
   const [connectionState, setConnectionState] =
     useState<ConnectionState>("checking");
@@ -65,6 +79,7 @@ export function App() {
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   const [streamedText, setStreamedText] = useState("");
   const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
+  const [memoryNotice, setMemoryNotice] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [providerStatus, setProviderStatus] =
     useState<ProviderStatusResponse | null>(null);
@@ -188,6 +203,7 @@ export function App() {
     setChatError(null);
     setStreamedText("");
     setToolActivities([]);
+    setMemoryNotice(null);
     if (selectedSessionId) {
       void loadMessages(selectedSessionId);
     } else {
@@ -289,6 +305,13 @@ export function App() {
                 : activity,
             ),
           );
+          if (
+            event.toolName === "remember" &&
+            !event.isError &&
+            reportsMemoryUpdate(event.output)
+          ) {
+            setMemoryNotice("Memory updated");
+          }
           return;
         }
         if (event.type === "assistant.completed") {
@@ -436,6 +459,7 @@ export function App() {
     setActiveRun(pendingRun);
     setStreamedText("");
     setToolActivities([]);
+    setMemoryNotice(null);
     setComposerText("");
     setChatError(null);
   };
@@ -469,7 +493,7 @@ export function App() {
     <main className="app-shell">
       <aside className="sidebar" aria-label="Conversations">
         <header className="brand">
-          <p className="eyebrow">Milestone 4</p>
+          <p className="eyebrow">Milestone 5</p>
           <h1 id="app-title">SynthiaClaw</h1>
           <p>Persistent local chat</p>
         </header>
@@ -599,9 +623,21 @@ export function App() {
                 <p className="eyebrow">Conversation</p>
                 <h2 id="conversation-title">{selectedSession.title}</h2>
               </div>
-              <span className="message-count">
-                {messages.length} {messages.length === 1 ? "message" : "messages"}
-              </span>
+              <div className="chat-header__status">
+                {memoryNotice ? (
+                  <span
+                    className="memory-updated"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    {memoryNotice}
+                  </span>
+                ) : null}
+                <span className="message-count">
+                  {messages.length}{" "}
+                  {messages.length === 1 ? "message" : "messages"}
+                </span>
+              </div>
             </header>
 
             <div className="message-list" aria-live="polite">

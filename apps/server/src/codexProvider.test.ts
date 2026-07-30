@@ -241,6 +241,10 @@ describe("CodexSubscriptionProvider", () => {
     await expect(
       collect(
         provider.stream([
+          {
+            role: "system",
+            content: "## MEMORY.md\n# Memory\n\n- Prefers dark mode.",
+          },
           { role: "user", content: "Earlier question" },
           { role: "assistant", content: "Earlier answer" },
           { role: "user", content: "Current question" },
@@ -257,6 +261,9 @@ describe("CodexSubscriptionProvider", () => {
         ephemeral: true,
         model: "gpt-test",
         sandbox: "read-only",
+        developerInstructions: expect.stringContaining(
+          "## MEMORY.md\n# Memory\n\n- Prefers dark mode.",
+        ),
       }),
     });
     expect(transport.sent).toContainEqual({

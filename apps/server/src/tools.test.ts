@@ -21,7 +21,7 @@ function createWorkspace() {
 }
 
 describe("tool registry", () => {
-  it("registers the four Milestone 4 tools and returns deterministic current time", async () => {
+  it("registers the agent tools and returns deterministic current time", async () => {
     const registry = createToolRegistry({
       workspaceRoot: createWorkspace(),
       now: () => new Date("2026-07-30T12:34:56.000Z"),
@@ -32,6 +32,7 @@ describe("tool registry", () => {
       "list_files",
       "read_file",
       "write_file",
+      "remember",
     ]);
     await expect(registry.execute("current_time", {})).resolves.toEqual({
       iso: "2026-07-30T12:34:56.000Z",
@@ -100,5 +101,30 @@ describe("tool registry", () => {
     ).rejects.toMatchObject<Partial<ToolError>>({
       code: "TOOL_PATH_OUTSIDE_WORKSPACE",
     });
+  });
+
+  it("remembers a preference in MEMORY.md without duplicating it", async () => {
+    const workspaceRoot = createWorkspace();
+    const registry = createToolRegistry({ workspaceRoot });
+
+    await expect(
+      registry.execute("remember", {
+        memory: "The user prefers dark mode.",
+      }),
+    ).resolves.toEqual({
+      path: "MEMORY.md",
+      memory: "The user prefers dark mode.",
+      updated: true,
+    });
+    await expect(
+      registry.execute("remember", {
+        memory: "The user prefers dark mode.",
+      }),
+    ).resolves.toMatchObject({
+      updated: false,
+    });
+    expect(readFileSync(join(workspaceRoot, "MEMORY.md"), "utf8")).toBe(
+      "# Memory\n\n- The user prefers dark mode.\n",
+    );
   });
 });

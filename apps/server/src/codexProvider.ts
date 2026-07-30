@@ -264,15 +264,19 @@ export class CodexAppServerClient implements CodexAccountManager {
 
   async startThread(options: {
     cwd: string;
+    developerInstructions?: string;
     model?: string;
     tools?: ProviderToolDefinition[];
   }): Promise<string> {
+    const baseInstructions =
+      "You are the assistant in a persistent chat application. Answer the user's request directly. Use only the dynamic tools provided by the host when they are useful.";
     const result = asRecord(
       await this.request("thread/start", {
         approvalPolicy: "never",
         cwd: options.cwd,
-        developerInstructions:
-          "You are the assistant in a persistent chat application. Answer the user's request directly. Use only the dynamic tools provided by the host when they are useful.",
+        developerInstructions: options.developerInstructions
+          ? `${baseInstructions}\n\n${options.developerInstructions}`
+          : baseInstructions,
         ephemeral: true,
         ...(options.model ? { model: options.model } : {}),
         ...(options.tools?.length ? { dynamicTools: options.tools } : {}),
@@ -623,7 +627,14 @@ export class CodexSubscriptionProvider implements ModelProvider {
     tools: ProviderToolDefinition[] = [],
     executeTool?: ProviderToolExecutor,
   ): AsyncIterable<ProviderStreamChunk> {
-    const current = messages.at(-1);
+    const systemInstructions = messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
+      .join("\n\n");
+    const conversationMessages = messages.filter(
+      (message) => message.role !== "system",
+    );
+    const current = conversationMessages.at(-1);
     if (!current || current.role !== "user") {
       throw new ProviderError(
         "PROVIDER_INVALID_REQUEST",
@@ -643,10 +654,13 @@ export class CodexSubscriptionProvider implements ModelProvider {
     signal.throwIfAborted();
     const threadId = await this.client.startThread({
       ...this.options,
+      ...(systemInstructions
+        ? { developerInstructions: systemInstructions }
+        : {}),
       tools: executeTool ? tools : [],
     });
     signal.throwIfAborted();
-    await this.client.injectItems(threadId, messages.slice(0, -1));
+    await this.client.injectItems(threadId, conversationMessages.slice(0, -1));
     yield* this.client.streamTurn(
       threadId,
       current.content,

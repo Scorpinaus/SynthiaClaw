@@ -287,6 +287,23 @@ button:disabled {
   letter-spacing: -0.025em;
 }
 
+.chat-header__status {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.memory-updated {
+  padding: 0.28rem 0.55rem;
+  border: 1px solid #2b765d;
+  border-radius: 999px;
+  color: #9de6c3;
+  background: #123b30;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
 .message-count {
   flex: 0 0 auto;
   color: #71898d;

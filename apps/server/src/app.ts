@@ -26,6 +26,7 @@ import {
 import Fastify, { type FastifyServerOptions } from "fastify";
 
 import { runAgentLoop } from "./agentLoop.js";
+import { buildAgentContext } from "./identity.js";
 import {
   ProviderError,
   type ModelProvider,
@@ -42,6 +43,7 @@ export interface AppDependencies {
   repository?: ChatRepository;
   agent?: {
     workspaceRoot: string;
+    maxContextChars?: number;
     maxIterations: number;
     timeoutMs: number;
     now?: () => Date;
@@ -100,6 +102,9 @@ export function buildApp(
     maxIterations:
       dependencies.agent?.maxIterations ??
       readPositiveInteger(process.env.AGENT_MAX_ITERATIONS, 8),
+    maxContextChars:
+      dependencies.agent?.maxContextChars ??
+      readPositiveInteger(process.env.AGENT_CONTEXT_MAX_CHARS, 60_000),
     timeoutMs:
       dependencies.agent?.timeoutMs ??
       readPositiveInteger(process.env.AGENT_TIMEOUT_MS, 30_000),
@@ -504,12 +509,16 @@ export function buildApp(
             );
           }
 
-          const messages = repository
-            .listMessages(event.sessionId)
-            .map((message) => ({
-              role: message.role,
-              content: message.payload.text,
-            }));
+          const messages = await buildAgentContext({
+            workspaceRoot: agent.workspaceRoot,
+            maxChars: agent.maxContextChars,
+            messages: repository
+              .listMessages(event.sessionId)
+              .map((message) => ({
+                role: message.role,
+                content: message.payload.text,
+              })),
+          });
           const responseText = await runAgentLoop({
             provider,
             messages,
