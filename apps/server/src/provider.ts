@@ -382,3 +382,22 @@ export function createOpenAIProviderFromEnv(
     model,
   });
 }
+
+export function createOllamaProviderFromEnv(
+  environment: Record<string, string | undefined> = process.env,
+): ModelProvider {
+  const model = environment.OLLAMA_MODEL?.trim();
+  if (!model) {
+    throw new ProviderError(
+      "PROVIDER_NOT_CONFIGURED",
+      "Set OLLAMA_MODEL on the backend to enable Ollama chat.",
+    );
+  }
+
+  return new OpenAICompatibleProvider({
+    apiKey: environment.OLLAMA_API_KEY || "ollama",
+    baseUrl:
+      environment.OLLAMA_BASE_URL ?? "http://127.0.0.1:11434/v1",
+    model,
+  });
+}

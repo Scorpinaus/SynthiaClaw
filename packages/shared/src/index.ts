@@ -94,6 +94,7 @@ export const ErrorResponseSchema = z
 
 export const ProviderModeSchema = z.enum([
   "openai-api",
+  "ollama",
   "codex-subscription",
 ]);
 

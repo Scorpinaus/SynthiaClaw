@@ -177,7 +177,7 @@ export function buildApp(
   );
 
   app.get("/api/provider", async (_request, reply) => {
-    if (runtime.mode === "openai-api") {
+    if (runtime.mode !== "codex-subscription") {
       return ProviderStatusResponseSchema.parse({
         mode: runtime.mode,
         ready: runtime.provider !== null,

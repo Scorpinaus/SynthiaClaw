@@ -138,6 +138,31 @@ describe("SynthiaClaw chat workspace", () => {
     );
   });
 
+  it("shows when the Ollama provider is configured", async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = input.toString();
+      if (url === "/api/health") return healthResponse();
+      if (url === "/api/sessions") return jsonResponse({ sessions: [] });
+      if (url === "/api/provider") {
+        return jsonResponse({
+          mode: "ollama",
+          ready: true,
+          account: null,
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+
+    render(<App />);
+
+    expect(await screen.findByText("Ollama configured")).toBeInTheDocument();
+    expect(
+      screen.getByText("Local model requests are routed through Ollama."),
+    ).toBeInTheDocument();
+  });
+
   it("loads persisted sessions and message history", async () => {
     fetchMock.mockImplementation(async (input) => {
       const url = input.toString();

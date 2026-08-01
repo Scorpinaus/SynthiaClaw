@@ -14,12 +14,14 @@ describe("credential redaction", () => {
       "oauth-access-secret",
       "refresh-secret",
       "basic-password",
+      "ollama-remote-secret",
     ];
     const unsafe = [
       `Authorization: Bearer ${secrets[0]}`,
       `"access_token":"${secrets[1]}"`,
       `refresh_token=${secrets[2]}`,
       `https://local-user:${secrets[3]}@provider.example/path`,
+      `OLLAMA_API_KEY=${secrets[4]}`,
     ].join(" ");
 
     const safe = redactCredentials(unsafe);
@@ -54,6 +56,7 @@ describe("credential redaction", () => {
           "req.headers.cookie",
           "headers.authorization",
           "apiKey",
+          "OLLAMA_API_KEY",
           "accessToken",
           "refreshToken",
         ]),

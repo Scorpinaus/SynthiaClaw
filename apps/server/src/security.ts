@@ -1,7 +1,7 @@
 export const REDACTED_VALUE = "[REDACTED]";
 
 const sensitiveKeyPattern =
-  /^(?:authorization|cookie|set-cookie|password|api[_-]?key|openai_api_key|access[_-]?token|refresh[_-]?token|client[_-]?secret)$/i;
+  /^(?:authorization|cookie|set-cookie|password|api[_-]?key|openai_api_key|ollama_api_key|access[_-]?token|refresh[_-]?token|client[_-]?secret)$/i;
 
 export function redactCredentials(value: string): string {
   return value
@@ -14,7 +14,7 @@ export function redactCredentials(value: string): string {
       `$1${REDACTED_VALUE}`,
     )
     .replace(
-      /(\b(?:OPENAI_API_KEY|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\b\s*["']?\s*[:=]\s*["']?)([^"',;\s}]+)/gi,
+      /(\b(?:OPENAI_API_KEY|OLLAMA_API_KEY|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\b\s*["']?\s*[:=]\s*["']?)([^"',;\s}]+)/gi,
       `$1${REDACTED_VALUE}`,
     )
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, REDACTED_VALUE)
@@ -46,6 +46,7 @@ export function createLoggerOptions() {
         "apiKey",
         "api_key",
         "OPENAI_API_KEY",
+        "OLLAMA_API_KEY",
         "accessToken",
         "access_token",
         "refreshToken",

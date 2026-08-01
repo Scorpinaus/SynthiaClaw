@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   OpenAICompatibleProvider,
   ProviderError,
+  createOllamaProviderFromEnv,
   createOpenAIProviderFromEnv,
   type ProviderStreamChunk,
 } from "./provider.js";
@@ -256,6 +257,61 @@ describe("OpenAICompatibleProvider", () => {
 });
 
 describe("createProviderRuntimeFromEnv", () => {
+  it("connects Ollama through its OpenAI-compatible localhost endpoint", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        'data: {"choices":[{"delta":{"content":"Local reply"}}]}\n\ndata: [DONE]\n\n',
+        { headers: { "Content-Type": "text/event-stream" }, status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const provider = createOllamaProviderFromEnv({
+        OLLAMA_MODEL: "llama3.2",
+      });
+
+      await expect(
+        collect(provider.stream([{ role: "user", content: "Hello" }])),
+      ).resolves.toEqual(["Local reply"]);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:11434/v1/chat/completions",
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer ollama",
+          }),
+          body: JSON.stringify({
+            model: "llama3.2",
+            messages: [{ role: "user", content: "Hello" }],
+            stream: true,
+          }),
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("selects Ollama mode and reports a missing model as configuration", () => {
+    expect(
+      createProviderRuntimeFromEnv({
+        MODEL_PROVIDER: "ollama",
+        OLLAMA_MODEL: "qwen3",
+      }),
+    ).toMatchObject({ mode: "ollama", provider: expect.any(Object) });
+
+    expect(
+      createProviderRuntimeFromEnv({ MODEL_PROVIDER: "ollama" }),
+    ).toMatchObject({
+      mode: "ollama",
+      provider: null,
+      configurationError: {
+        code: "PROVIDER_NOT_CONFIGURED",
+        message: "Set OLLAMA_MODEL on the backend to enable Ollama chat.",
+      },
+    });
+  });
+
   it("selects Codex subscription mode without requiring an API key", async () => {
     const runtime = createProviderRuntimeFromEnv({
       MODEL_PROVIDER: "codex",

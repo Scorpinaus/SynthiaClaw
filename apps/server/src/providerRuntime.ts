@@ -7,6 +7,7 @@ import {
 } from "./codexProvider.js";
 import {
   ProviderError,
+  createOllamaProviderFromEnv,
   createOpenAIProviderFromEnv,
   type ProviderRuntime,
 } from "./provider.js";
@@ -37,17 +38,22 @@ export function createProviderRuntimeFromEnv(
     };
   }
 
-  if (selected !== "openai") {
+  if (selected !== "openai" && selected !== "ollama") {
     throw new ProviderError(
       "PROVIDER_NOT_CONFIGURED",
-      'MODEL_PROVIDER must be either "openai" or "codex".',
+      'MODEL_PROVIDER must be "openai", "ollama", or "codex".',
     );
   }
 
+  const mode = selected === "ollama" ? "ollama" : "openai-api";
+
   try {
     return {
-      mode: "openai-api",
-      provider: createOpenAIProviderFromEnv(environment),
+      mode,
+      provider:
+        selected === "ollama"
+          ? createOllamaProviderFromEnv(environment)
+          : createOpenAIProviderFromEnv(environment),
       close: async () => {},
     };
   } catch (error) {
@@ -59,7 +65,7 @@ export function createProviderRuntimeFromEnv(
             "The model provider is not configured.",
           );
     return {
-      mode: "openai-api",
+      mode,
       provider: null,
       configurationError,
       close: async () => {},

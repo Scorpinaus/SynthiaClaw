@@ -2,20 +2,39 @@
 
 SynthiaClaw is a local-first chat workspace with a Fastify backend, React/Vite
 frontend, shared Zod contracts, SQLite conversation persistence, and an
-OpenAI-compatible streaming model provider. Agent conversations can use either
-an API key or a ChatGPT subscription through the official Codex app-server
-OAuth flow.
+OpenAI-compatible streaming model provider. Agent conversations can use a
+local Ollama model, an API key, or a ChatGPT subscription through the official
+Codex app-server OAuth flow.
 
 ## Requirements
 
 - Node.js 22 or newer
 - One model-provider option:
+  - Ollama with a locally installed model
   - An OpenAI-compatible chat-completions endpoint and API key
   - The Codex CLI plus a ChatGPT plan that supports Codex
 
 ## Configure
 
 Copy `.env.example` to `.env`, then choose one provider.
+
+### Ollama
+
+Install and start Ollama, then download the model SynthiaClaw should use. For
+example:
+
+```powershell
+ollama pull llama3.2
+$env:MODEL_PROVIDER = "ollama"
+$env:OLLAMA_MODEL = "llama3.2"
+npm.cmd run dev
+```
+
+`OLLAMA_BASE_URL` defaults to `http://127.0.0.1:11434/v1`. Set it when Ollama
+is listening at another OpenAI-compatible URL. `OLLAMA_API_KEY` is optional
+and is only needed when a remote Ollama-compatible endpoint or proxy requires
+one. SynthiaClaw uses Ollama's OpenAI-compatible streaming chat endpoint, so
+supported local models can use the same server tools as API-key mode.
 
 ### ChatGPT/Codex subscription
 

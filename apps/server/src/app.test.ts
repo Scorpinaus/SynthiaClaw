@@ -142,6 +142,36 @@ describe("model provider REST API", () => {
     });
   });
 
+  it("reports Ollama mode without requiring an account manager", async () => {
+    const ollamaApp = buildApp(
+      { logger: false },
+      {
+        databasePath: ":memory:",
+        providerRuntime: {
+          mode: "ollama",
+          provider: { stream },
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      },
+    );
+
+    try {
+      const response = await ollamaApp.inject({
+        method: "GET",
+        url: "/api/provider",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(ProviderStatusResponseSchema.parse(response.json())).toEqual({
+        mode: "ollama",
+        ready: true,
+        account: null,
+      });
+    } finally {
+      await ollamaApp.close();
+    }
+  });
+
   it("starts OAuth, reports the connected subscription, and logs out", async () => {
     const accountManager: CodexAccountManager = {
       getSubscriptionStatus: vi.fn().mockResolvedValue({

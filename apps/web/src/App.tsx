@@ -435,8 +435,7 @@ export function App() {
       !selectedSessionId ||
       !text ||
       running ||
-      (providerStatus?.mode === "codex-subscription" &&
-        !providerStatus.ready) ||
+      (providerStatus !== null && !providerStatus.ready) ||
       !socket ||
       socket.readyState !== WebSocket.OPEN
     ) {
@@ -570,6 +569,28 @@ export function App() {
                     : "Connect ChatGPT"}
               </button>
               {providerNotice ? <p>{providerNotice}</p> : null}
+            </div>
+          ) : null}
+          {providerStatus?.mode === "ollama" ? (
+            <div
+              className={`provider-status ${
+                providerStatus.ready
+                  ? "provider-status--connected"
+                  : "provider-status--disconnected"
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              <strong>
+                {providerStatus.ready
+                  ? "Ollama configured"
+                  : "Ollama not configured"}
+              </strong>
+              <p>
+                {providerStatus.ready
+                  ? "Local model requests are routed through Ollama."
+                  : "Set OLLAMA_MODEL on the backend to enable conversations."}
+              </p>
             </div>
           ) : null}
         </div>
@@ -737,8 +758,7 @@ export function App() {
                     aria-label="Send message"
                     disabled={
                       socketState !== "connected" ||
-                      (providerStatus?.mode === "codex-subscription" &&
-                        !providerStatus.ready) ||
+                      (providerStatus !== null && !providerStatus.ready) ||
                       composerText.trim().length === 0
                     }
                   >
