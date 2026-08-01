@@ -21,6 +21,7 @@ import type {
   ModelProvider,
   ProviderRuntime,
 } from "./provider.js";
+import { ProviderError } from "./provider.js";
 
 const stream = vi.fn<ModelProvider["stream"]>(async function* (messages) {
   const latest = messages.at(-1);
@@ -30,6 +31,13 @@ const app = buildApp(
   { logger: false },
   { databasePath: ":memory:", provider: { stream } },
 );
+const trustedFrontendOrigin = "http://127.0.0.1:5173";
+
+function openChatSocket(targetApp: ReturnType<typeof buildApp>) {
+  return targetApp.injectWS("/api/chat", {
+    headers: { origin: trustedFrontendOrigin },
+  });
+}
 
 afterAll(async () => {
   await app.close();
@@ -69,6 +77,53 @@ describe("GET /api/health", () => {
     });
 
     expect(response.headers["content-type"]).toContain("application/json");
+  });
+});
+
+describe("frontend origin policy", () => {
+  it("accepts only the configured browser origin for HTTP and WebSocket requests", async () => {
+    const frontendOrigin = "http://127.0.0.1:5173";
+    const originApp = buildApp(
+      { logger: false },
+      {
+        databasePath: ":memory:",
+        provider: { stream },
+        frontendOrigin,
+      },
+    );
+
+    try {
+      const accepted = await originApp.inject({
+        method: "GET",
+        url: "/api/health",
+        headers: { origin: frontendOrigin },
+      });
+      expect(accepted.statusCode).toBe(200);
+
+      const rejected = await originApp.inject({
+        method: "GET",
+        url: "/api/health",
+        headers: { origin: "http://attacker.example" },
+      });
+      expect(rejected.statusCode).toBe(403);
+      expect(ErrorResponseSchema.parse(rejected.json())).toEqual({
+        error: {
+          code: "ORIGIN_NOT_ALLOWED",
+          message: "The request origin is not allowed.",
+        },
+      });
+
+      await expect(
+        originApp.injectWS("/api/chat", {
+          headers: { origin: "http://attacker.example" },
+        }),
+      ).rejects.toThrow("Unexpected server response: 403");
+      await expect(originApp.injectWS("/api/chat")).rejects.toThrow(
+        "Unexpected server response: 403",
+      );
+    } finally {
+      await originApp.close();
+    }
   });
 });
 
@@ -207,7 +262,7 @@ describe("WebSocket chat API", () => {
         payload: { title: "Agent time" },
       });
       const session = SessionResponseSchema.parse(createResponse.json()).session;
-      const socket = await agentApp.injectWS("/api/chat");
+      const socket = await openChatSocket(agentApp);
       const lifecycle = new Promise<ServerWebSocketEvent[]>(
         (resolve, reject) => {
           const events: ServerWebSocketEvent[] = [];
@@ -329,7 +384,7 @@ describe("WebSocket chat API", () => {
       };
       const firstSession = await createSession("Remember preference");
       const secondSession = await createSession("Recall preference");
-      const socket = await memoryApp.injectWS("/api/chat");
+      const socket = await openChatSocket(memoryApp);
       const receiveCompletedLifecycle = () =>
         new Promise<ServerWebSocketEvent[]>((resolve, reject) => {
           const events: ServerWebSocketEvent[] = [];
@@ -427,7 +482,7 @@ describe("WebSocket chat API", () => {
         payload: { title: "Iteration limit" },
       });
       const session = SessionResponseSchema.parse(created.json()).session;
-      const socket = await limitedApp.injectWS("/api/chat");
+      const socket = await openChatSocket(limitedApp);
       const failure = new Promise<ServerWebSocketEvent>((resolve, reject) => {
         socket.once("error", reject);
         socket.on("message", (data) => {
@@ -491,7 +546,7 @@ describe("WebSocket chat API", () => {
         payload: { title: "Timeout" },
       });
       const session = SessionResponseSchema.parse(created.json()).session;
-      const socket = await timeoutApp.injectWS("/api/chat");
+      const socket = await openChatSocket(timeoutApp);
       const failure = new Promise<ServerWebSocketEvent>((resolve, reject) => {
         socket.once("error", reject);
         socket.on("message", (data) => {
@@ -523,7 +578,7 @@ describe("WebSocket chat API", () => {
 
   it("persists one user message and one complete assistant response", async () => {
     const session = await createSession("WebSocket chat");
-    const socket = await app.injectWS("/api/chat");
+    const socket = await openChatSocket(app);
     const eventsPromise = new Promise<ServerWebSocketEvent[]>(
       (resolve, reject) => {
         const events: ServerWebSocketEvent[] = [];
@@ -599,7 +654,7 @@ describe("WebSocket chat API", () => {
 
   it("replays a completed duplicate request without duplicating messages", async () => {
     const session = await createSession("Duplicate request");
-    const socket = await app.injectWS("/api/chat");
+    const socket = await openChatSocket(app);
     const payload = {
       type: "chat.send",
       requestId: "req_duplicate_1",
@@ -648,7 +703,7 @@ describe("WebSocket chat API", () => {
 
   it("returns a schema-valid failure for invalid inbound payloads", async () => {
     const session = await createSession("Invalid request");
-    const socket = await app.injectWS("/api/chat");
+    const socket = await openChatSocket(app);
     const failurePromise = new Promise<ServerWebSocketEvent>(
       (resolve, reject) => {
         socket.once("error", reject);
@@ -680,12 +735,89 @@ describe("WebSocket chat API", () => {
     expect(stream).not.toHaveBeenCalled();
   });
 
+  it("returns a schema-valid failure for malformed JSON messages", async () => {
+    const socket = await openChatSocket(app);
+    const failurePromise = new Promise<ServerWebSocketEvent>(
+      (resolve, reject) => {
+        socket.once("error", reject);
+        socket.once("message", (data) => {
+          resolve(
+            ServerWebSocketEventSchema.parse(JSON.parse(data.toString())),
+          );
+        });
+      },
+    );
+
+    socket.send('{"type":"chat.send","requestId":');
+    const failure = await failurePromise;
+    socket.close();
+
+    expect(failure).toMatchObject({
+      type: "run.failed",
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "The WebSocket message is invalid.",
+      },
+    });
+    expect(stream).not.toHaveBeenCalled();
+  });
+
+  it("redacts credentials from live and replayed provider errors", async () => {
+    const apiKey = "sk-live-super-secret";
+    const accessToken = "oauth-access-secret";
+    stream.mockImplementationOnce(async function* () {
+      throw new ProviderError(
+        "PROVIDER_FAILED",
+        `Authorization: Bearer ${apiKey}; access_token=${accessToken}`,
+      );
+    });
+    const session = await createSession("Redacted failure");
+    const socket = await openChatSocket(app);
+    const payload = {
+      type: "chat.send",
+      requestId: "req_redacted_failure_1",
+      sessionId: session.id,
+      text: "Fail safely",
+    };
+    const receiveLifecycle = (eventCount: number) =>
+      new Promise<ServerWebSocketEvent[]>((resolve, reject) => {
+        const events: ServerWebSocketEvent[] = [];
+        const onMessage = (data: { toString(): string }) => {
+          events.push(
+            ServerWebSocketEventSchema.parse(JSON.parse(data.toString())),
+          );
+          if (events.length === eventCount) {
+            socket.off("message", onMessage);
+            resolve(events);
+          }
+        };
+        socket.once("error", reject);
+        socket.on("message", onMessage);
+      });
+
+    const firstLifecycle = receiveLifecycle(2);
+    socket.send(JSON.stringify(payload));
+    const firstFailure = (await firstLifecycle)[1];
+    const replayLifecycle = receiveLifecycle(2);
+    socket.send(JSON.stringify(payload));
+    const replayedFailure = (await replayLifecycle)[1];
+    socket.close();
+
+    for (const failure of [firstFailure, replayedFailure]) {
+      const serialized = JSON.stringify(failure);
+      expect(serialized).not.toContain(apiKey);
+      expect(serialized).not.toContain(accessToken);
+      expect(serialized).toContain("[REDACTED]");
+    }
+    expect(stream).toHaveBeenCalledTimes(1);
+  });
+
   it("releases the session lock when the provider fails", async () => {
     const session = await createSession("Provider failure");
     stream.mockImplementationOnce(async function* () {
       throw new Error("provider offline");
     });
-    const socket = await app.injectWS("/api/chat");
+    const socket = await openChatSocket(app);
 
     const receiveLifecycle = (eventCount: number) =>
       new Promise<ServerWebSocketEvent[]>((resolve, reject) => {
@@ -759,7 +891,7 @@ describe("WebSocket chat API", () => {
       const session = SessionResponseSchema.parse(
         createResponse.json(),
       ).session;
-      const socket = await cancelApp.injectWS("/api/chat");
+      const socket = await openChatSocket(cancelApp);
       const receiveEvents = (eventCount: number) =>
         new Promise<ServerWebSocketEvent[]>((resolve, reject) => {
           const events: ServerWebSocketEvent[] = [];
@@ -878,7 +1010,7 @@ describe("WebSocket chat API", () => {
       const session = SessionResponseSchema.parse(
         createResponse.json(),
       ).session;
-      const socket = await disconnectApp.injectWS("/api/chat");
+      const socket = await openChatSocket(disconnectApp);
       const partialLifecycle = new Promise<ServerWebSocketEvent[]>(
         (resolve, reject) => {
           const events: ServerWebSocketEvent[] = [];
@@ -906,7 +1038,7 @@ describe("WebSocket chat API", () => {
       socket.terminate();
       await abortObserved;
 
-      const recoverySocket = await disconnectApp.injectWS("/api/chat");
+      const recoverySocket = await openChatSocket(disconnectApp);
       const recoveredLifecycle = new Promise<ServerWebSocketEvent[]>(
         (resolve, reject) => {
           const events: ServerWebSocketEvent[] = [];
@@ -956,7 +1088,7 @@ describe("conversation persistence", () => {
         payload: { title: "Restart-safe conversation" },
       });
       const { session } = SessionResponseSchema.parse(createdResponse.json());
-      const socket = await firstApp.injectWS("/api/chat");
+      const socket = await openChatSocket(firstApp);
       const completion = new Promise<ServerWebSocketEvent>((resolve, reject) => {
         socket.on("error", reject);
         socket.on("message", (data) => {

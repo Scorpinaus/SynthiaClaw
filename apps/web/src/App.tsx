@@ -493,7 +493,7 @@ export function App() {
     <main className="app-shell">
       <aside className="sidebar" aria-label="Conversations">
         <header className="brand">
-          <p className="eyebrow">Milestone 5</p>
+          <p className="eyebrow">Milestone 6</p>
           <h1 id="app-title">SynthiaClaw</h1>
           <p>Persistent local chat</p>
         </header>

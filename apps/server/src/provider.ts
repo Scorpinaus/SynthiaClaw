@@ -5,6 +5,7 @@ import type {
 } from "@synthia/shared";
 
 import type { ProviderToolDefinition } from "./tools.js";
+import { redactCredentials } from "./security.js";
 
 export interface ProviderToolCall {
   callId: string;
@@ -70,7 +71,7 @@ export class ProviderError extends Error {
     public readonly code: string,
     message: string,
   ) {
-    super(message);
+    super(redactCredentials(message));
     this.name = "ProviderError";
   }
 }

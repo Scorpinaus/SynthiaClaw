@@ -1,4 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -59,8 +67,9 @@ describe("tool registry", () => {
     });
   });
 
-  it("lists, writes, and reads files while confining paths to the workspace", async () => {
+  it("lists, writes, and reads files only inside workspace/files", async () => {
     const workspaceRoot = createWorkspace();
+    const filesRoot = join(workspaceRoot, "files");
     const registry = createToolRegistry({ workspaceRoot });
 
     await expect(
@@ -72,7 +81,7 @@ describe("tool registry", () => {
       path: "notes/agent.txt",
       bytesWritten: 16,
     });
-    expect(readFileSync(join(workspaceRoot, "notes", "agent.txt"), "utf8")).toBe(
+    expect(readFileSync(join(filesRoot, "notes", "agent.txt"), "utf8")).toBe(
       "Tool loop works.",
     );
     await expect(
@@ -93,6 +102,12 @@ describe("tool registry", () => {
     ).rejects.toMatchObject<Partial<ToolError>>({
       code: "TOOL_PATH_OUTSIDE_WORKSPACE",
     });
+    writeFileSync(join(workspaceRoot, "private.txt"), "credential", "utf8");
+    await expect(
+      registry.execute("read_file", { path: "../private.txt" }),
+    ).rejects.toMatchObject<Partial<ToolError>>({
+      code: "TOOL_PATH_OUTSIDE_WORKSPACE",
+    });
     await expect(
       registry.execute("write_file", {
         path: join(workspaceRoot, "absolute.txt"),
@@ -101,6 +116,36 @@ describe("tool registry", () => {
     ).rejects.toMatchObject<Partial<ToolError>>({
       code: "TOOL_PATH_OUTSIDE_WORKSPACE",
     });
+
+    const outsideRoot = createWorkspace();
+    writeFileSync(join(outsideRoot, "outside.txt"), "escaped", "utf8");
+    mkdirSync(filesRoot, { recursive: true });
+    symlinkSync(outsideRoot, join(filesRoot, "escape"), "junction");
+    await expect(
+      registry.execute("read_file", { path: "escape/outside.txt" }),
+    ).rejects.toMatchObject<Partial<ToolError>>({
+      code: "TOOL_PATH_OUTSIDE_WORKSPACE",
+    });
+    await expect(
+      registry.execute("write_file", {
+        path: "escape/created.txt",
+        content: "blocked",
+      }),
+    ).rejects.toMatchObject<Partial<ToolError>>({
+      code: "TOOL_PATH_OUTSIDE_WORKSPACE",
+    });
+
+    const danglingTarget = join(outsideRoot, "dangling-directory");
+    symlinkSync(danglingTarget, join(filesRoot, "dangling"), "junction");
+    await expect(
+      registry.execute("write_file", {
+        path: "dangling/created.txt",
+        content: "blocked",
+      }),
+    ).rejects.toMatchObject<Partial<ToolError>>({
+      code: "TOOL_PATH_OUTSIDE_WORKSPACE",
+    });
+    expect(existsSync(join(danglingTarget, "created.txt"))).toBe(false);
   });
 
   it("remembers a preference in MEMORY.md without duplicating it", async () => {

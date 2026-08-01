@@ -66,14 +66,20 @@ into the backend process as shown or use your preferred environment loader.
 The backend binds to `127.0.0.1:3001`, the frontend binds to
 `127.0.0.1:5173`, and SQLite data is stored at `data/synthia.sqlite` by
 default. Override these with `HOST`, `PORT`, and `DATABASE_PATH`.
+Browser-originated API and WebSocket requests must match `FRONTEND_ORIGIN`,
+which defaults to `http://127.0.0.1:5173`. Backend logging redacts common
+authorization headers, API keys, OAuth tokens, passwords, and credentialed
+URLs.
 
 ## Agent tools and limits
 
 The server registry exposes `current_time`, `list_files`, `read_file`,
 `write_file`, and `remember`. Every tool argument object is validated on the
 backend. Filesystem paths must be relative and stay inside
-`TOOL_WORKSPACE_ROOT`, which defaults to `CODEX_WORKING_DIRECTORY` and then
-the backend process directory.
+the `files` directory under `TOOL_WORKSPACE_ROOT`, which defaults to
+`CODEX_WORKING_DIRECTORY` and then the backend process directory. Absolute
+paths, `..` traversal, and directory links that resolve outside that sandbox
+are rejected.
 
 At the start of every run, SynthiaClaw loads `AGENT.md`, `USER.md`, and
 `MEMORY.md` from that workspace when present. The `remember` tool adds a
@@ -98,6 +104,8 @@ the backend.
 npm.cmd install --cache .npm-cache
 npm.cmd run dev
 npm.cmd test
+npm.cmd exec playwright -- install chromium
+npm.cmd run test:e2e
 npm.cmd run typecheck
 npm.cmd run build
 ```

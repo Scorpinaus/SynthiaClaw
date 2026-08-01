@@ -10,6 +10,7 @@ describe("Vite development proxy", () => {
     const config = viteConfig as UserConfig;
 
     expect(config.server?.proxy?.["/api"]).toMatchObject({
+      changeOrigin: false,
       target: "http://127.0.0.1:3001",
       ws: true,
     });

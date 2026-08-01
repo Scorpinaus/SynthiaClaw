@@ -26,6 +26,7 @@ import {
 import Fastify, { type FastifyServerOptions } from "fastify";
 
 import { runAgentLoop } from "./agentLoop.js";
+import { normalizeFrontendOrigin } from "./config.js";
 import { buildAgentContext } from "./identity.js";
 import {
   ProviderError,
@@ -34,6 +35,7 @@ import {
 } from "./provider.js";
 import { createProviderRuntimeFromEnv } from "./providerRuntime.js";
 import { ChatRepository, RepositoryError } from "./repository.js";
+import { redactCredentials } from "./security.js";
 import { createToolRegistry } from "./tools.js";
 
 export interface AppDependencies {
@@ -41,6 +43,7 @@ export interface AppDependencies {
   provider?: ModelProvider;
   providerRuntime?: ProviderRuntime;
   repository?: ChatRepository;
+  frontendOrigin?: string;
   agent?: {
     workspaceRoot: string;
     maxContextChars?: number;
@@ -93,6 +96,11 @@ export function buildApp(
   }
   const provider = runtime.provider;
   const providerConfigurationError = runtime.configurationError ?? null;
+  const frontendOrigin = normalizeFrontendOrigin(
+    dependencies.frontendOrigin ??
+      process.env.FRONTEND_ORIGIN ??
+      "http://127.0.0.1:5173",
+  );
   const agent = {
     workspaceRoot:
       dependencies.agent?.workspaceRoot ??
@@ -115,7 +123,9 @@ export function buildApp(
   });
 
   const errorBody = (code: string, message: string) =>
-    ErrorResponseSchema.parse({ error: { code, message } });
+    ErrorResponseSchema.parse({
+      error: { code, message: redactCredentials(message) },
+    });
 
   const providerErrorReply = (
     reply: { code(statusCode: number): { send(payload: unknown): unknown } },
@@ -136,6 +146,25 @@ export function buildApp(
       await runtime.close();
     } finally {
       repository.close();
+    }
+  });
+
+  app.addHook("onRequest", async (request, reply) => {
+    const requestOrigin = request.headers.origin;
+    const isWebSocketUpgrade =
+      request.headers.upgrade?.toLowerCase() === "websocket";
+    if (
+      (isWebSocketUpgrade && requestOrigin === undefined) ||
+      (requestOrigin !== undefined && requestOrigin !== frontendOrigin)
+    ) {
+      return reply
+        .code(403)
+        .send(
+          errorBody(
+            "ORIGIN_NOT_ALLOWED",
+            "The request origin is not allowed.",
+          ),
+        );
     }
   });
 
@@ -558,7 +587,7 @@ export function buildApp(
                   sessionId: event.sessionId,
                   callId: call.callId,
                   toolName: call.toolName,
-                  output,
+                  output: isError ? redactCredentials(output) : output,
                   isError,
                 }),
               );
@@ -609,7 +638,7 @@ export function buildApp(
             return;
           }
 
-          const detail =
+          const unsafeDetail =
             active.timedOut
               ? {
                   code: "AGENT_TIMEOUT",
@@ -622,6 +651,10 @@ export function buildApp(
                   message:
                     "The model provider could not complete the request.",
                 };
+          const detail = {
+            ...unsafeDetail,
+            message: redactCredentials(unsafeDetail.message),
+          };
           repository.failRun(event.requestId, detail);
           send(
             RunFailedEventSchema.parse({

@@ -1,12 +1,12 @@
 import { buildApp } from "./app.js";
+import { readServerConfig } from "./config.js";
+import { createLoggerOptions, sanitizeLogValue } from "./security.js";
 
-const host = process.env.HOST ?? "127.0.0.1";
-const port = Number.parseInt(process.env.PORT ?? "3001", 10);
-const app = buildApp({ logger: true });
-
-if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-  throw new Error("PORT must be an integer between 1 and 65535.");
-}
+const { host, port, frontendOrigin } = readServerConfig();
+const app = buildApp(
+  { logger: createLoggerOptions() },
+  { frontendOrigin },
+);
 
 const shutdown = async () => {
   await app.close();
@@ -19,6 +19,9 @@ process.once("SIGTERM", shutdown);
 try {
   await app.listen({ host, port });
 } catch (error) {
-  app.log.error(error);
+  app.log.error(
+    { err: sanitizeLogValue(error) },
+    "The server could not start.",
+  );
   process.exit(1);
 }

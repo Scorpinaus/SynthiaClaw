@@ -1,8 +1,11 @@
 .npm-cache/
+.playwright-workspace/
 apps/*/dist/
 data/
 node_modules/
 packages/*/dist/
+playwright-report/
+test-results/
 *.log
 *.tsbuildinfo
 .env

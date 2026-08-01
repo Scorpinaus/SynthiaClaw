@@ -1,4 +1,5 @@
 import {
+  lstat,
   mkdir,
   readdir,
   readFile,
@@ -9,6 +10,8 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { z, type ZodTypeAny } from "zod";
+
+import { redactCredentials } from "./security.js";
 
 export interface ProviderToolDefinition {
   name: string;
@@ -41,7 +44,7 @@ export class ToolError extends Error {
     public readonly code: string,
     message: string,
   ) {
-    super(message);
+    super(redactCredentials(message));
     this.name = "ToolError";
   }
 }
@@ -70,7 +73,15 @@ export function createToolRegistry(
   options: ToolRegistryOptions,
 ): ToolRegistry {
   const workspaceRoot = resolve(options.workspaceRoot);
+  const filesRoot = resolve(workspaceRoot, "files");
   const now = options.now ?? (() => new Date());
+
+  const prepareFilesRoot = async () => {
+    await assertNearestExistingAncestorInside(workspaceRoot, filesRoot);
+    await mkdir(filesRoot, { recursive: true });
+    await assertRealPathInside(workspaceRoot, filesRoot);
+    return filesRoot;
+  };
 
   const tools: RegisteredTool[] = [
     {
@@ -87,21 +98,23 @@ export function createToolRegistry(
     {
       name: "list_files",
       description:
-        "List the direct children of a directory inside the configured workspace.",
+        "List the direct children of a directory inside workspace/files.",
       inputSchema: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "Workspace-relative directory path. Defaults to '.'.",
+            description:
+              "Path relative to workspace/files. Defaults to '.'.",
           },
         },
         additionalProperties: false,
       },
       argumentsSchema: ListFilesArgumentsSchema,
       run: async (argumentsValue: { path: string }) => {
+        const sandboxRoot = await prepareFilesRoot();
         const target = await resolveExistingWorkspacePath(
-          workspaceRoot,
+          sandboxRoot,
           argumentsValue.path,
         );
         const entries = await readdir(target, { withFileTypes: true });
@@ -128,13 +141,13 @@ export function createToolRegistry(
     },
     {
       name: "read_file",
-      description: "Read a UTF-8 text file inside the configured workspace.",
+      description: "Read a UTF-8 text file inside workspace/files.",
       inputSchema: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "Workspace-relative file path.",
+            description: "Path relative to workspace/files.",
           },
         },
         required: ["path"],
@@ -142,8 +155,9 @@ export function createToolRegistry(
       },
       argumentsSchema: ReadFileArgumentsSchema,
       run: async (argumentsValue: { path: string }) => {
+        const sandboxRoot = await prepareFilesRoot();
         const target = await resolveExistingWorkspacePath(
-          workspaceRoot,
+          sandboxRoot,
           argumentsValue.path,
         );
         const metadata = await stat(target);
@@ -162,13 +176,13 @@ export function createToolRegistry(
     {
       name: "write_file",
       description:
-        "Write a UTF-8 text file inside the configured workspace, creating parent directories.",
+        "Write a UTF-8 text file inside workspace/files, creating parent directories.",
       inputSchema: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "Workspace-relative file path.",
+            description: "Path relative to workspace/files.",
           },
           content: {
             type: "string",
@@ -180,14 +194,16 @@ export function createToolRegistry(
       },
       argumentsSchema: WriteFileArgumentsSchema,
       run: async (argumentsValue: { path: string; content: string }) => {
-        const target = resolveWorkspacePath(workspaceRoot, argumentsValue.path);
+        const sandboxRoot = await prepareFilesRoot();
+        const target = resolveWorkspacePath(sandboxRoot, argumentsValue.path);
         const parent = dirname(target);
-        await assertNearestExistingAncestorInside(workspaceRoot, parent);
+        await assertNearestExistingAncestorInside(sandboxRoot, parent);
         await mkdir(parent, { recursive: true });
-        await assertRealPathInside(workspaceRoot, parent);
+        await assertRealPathInside(sandboxRoot, parent);
         try {
-          await stat(target);
-          await assertRealPathInside(workspaceRoot, target);
+          const metadata = await lstat(target);
+          if (metadata.isSymbolicLink()) throw outsideWorkspaceError();
+          await assertRealPathInside(sandboxRoot, target);
         } catch (error) {
           if (error instanceof ToolError || !isNotFoundError(error)) throw error;
         }
@@ -327,6 +343,17 @@ async function assertNearestExistingAncestorInside(
       return;
     } catch (error) {
       if (error instanceof ToolError) throw error;
+      try {
+        const metadata = await lstat(candidate);
+        if (metadata.isSymbolicLink()) throw outsideWorkspaceError();
+      } catch (metadataError) {
+        if (
+          metadataError instanceof ToolError ||
+          !isNotFoundError(metadataError)
+        ) {
+          throw metadataError;
+        }
+      }
       const parent = dirname(candidate);
       if (parent === candidate) throw outsideWorkspaceError();
       candidate = parent;
@@ -348,7 +375,7 @@ function assertLexicallyInside(workspaceRoot: string, target: string): void {
 function outsideWorkspaceError(): ToolError {
   return new ToolError(
     "TOOL_PATH_OUTSIDE_WORKSPACE",
-    "Tool paths must stay inside the configured workspace.",
+    "File tool paths must stay inside the workspace/files sandbox.",
   );
 }
 
